@@ -1,20 +1,129 @@
-############################################################
-# Using the Developmental History (Parent) Questionnaire,
-# we calculate gestational medication exposure scores
-# for a range of psychotropic classes.
+################################################################################
+# Woodruff & van Dijk Framework: Prenatal Medication/Substance Exposure Coding
+# (ABCD Developmental History Questionnaire – Parent / DHX)
 #
-# We use TWO informants:
-#   (1) Rx free-text labels: ph_p_dhx__rx__label_00Xa/00Xb
-#   (2) Direct substance items: alc/mj/nic/coc/opi/caff stems
-# 
-# Exposure definitions:
-#   - "before" = before knowledge of pregnancy (A stems)
-#   - "after"  = after knowledge of pregnancy (B stems)
-#   - "any"    = before OR after (or pregnancy-wide item for caffeine)
+# Purpose
+# -------
+# This script constructs gestational exposure indicators for multiple psychotropic
+# medication classes and key prenatal substance exposures using ABCD DHX data.
+# Outputs from this script are designed to feed directly into the Woodruff & van Dijk
+# causal inference framework (ATT propensity score weighting + weighted outcome models).
 #
-# Collaborators should email james.woodruff@nyspi.columbia.edu
-# for the data file.
-############################################################
+# We use TWO informants to capture exposure more completely:
+#   (1) Rx free-text medication labels (ph_p_dhx__rx__label_00Xa / 00Xb items)
+#   (2) Direct DHX substance items (alc/mj/nic/coc/opi/caff stems + quantity fields)
+#
+# Exposure Timing Definitions
+# --------------------------
+# DHX timing is operationalized using the questionnaire stem suffix:
+#   - "_a" = before knowledge of pregnancy  ("before")
+#   - "_b" = after knowledge of pregnancy   ("after")
+#   - "any" = before OR after (or pregnancy-wide item for caffeine)
+#
+# Primary Outputs (high level)
+# ----------------------------
+# After running this script, MED_DHQ_Data_xlsx contains:
+#
+#  A) Class-level medication exposure flags derived from Rx free-text
+#     - Prenatal anytime exposures: prenatal_<class>_exposure
+#     - Timing-specific exposures:  <class>_before, <class>_after
+#     - Timing pattern flags:       <class>_before_only, <class>_after_only,
+#                                   <class>_before_and_after
+#     Classes include:
+#       * Antidepressants (overall)
+#       * SSRIs
+#       * SNRIs
+#       * Other antidepressants (non-SSRI, non-SNRI)
+#       * Anticonvulsants / mood stabilizers
+#       * Stimulants
+#       * Sleep aids / sedative-hypnotics
+#       * Anxiolytics
+#       * Antipsychotics
+#       * Opioids
+#
+#  B) Class-level “which drugs were detected” text summaries (Rx free-text)
+#     - <class>_*_drug variables store matched generic/brand terms as a
+#       semicolon-delimited string (e.g., "sertraline; zoloft")
+#
+#  C) Direct prenatal substance exposure flags from DHX structured items
+#     - alc_before/after/any
+#     - mj_before/after/any
+#     - nic_before/after/any
+#     - coc_before/after/any
+#     - opi_hm_before/after/any (heroin/morphine direct item)
+#     - caff_any (pregnancy-wide only; no before/after stems in DHX)
+#
+#  D) Opioid harmonization across informants
+#     - Opioid class flags (opioid_before/after and prenatal_opioid_exposure) are
+#       updated to incorporate the direct heroin/morphine DHX item, preventing
+#       under-ascertainment when opioids were not typed into Rx free-text.
+#
+#  E) Drug-specific binary indicators (Rx free-text)
+#     - For each medication in drug_patterns, create:
+#         <drug>_before, <drug>_after, <drug>_any
+#       to support more granular sensitivity analyses (e.g., sertraline-only).
+#
+# ------------------------------------------------------------------------------
+# Required Input Data
+# ------------------------------------------------------------------------------
+# The script assumes a data.frame named MED_DHQ_Data_xlsx exists in memory and
+# includes at minimum the following variables:
+#
+# Identifiers / Metadata
+#   - participant_id              (unique participant identifier)
+#   - session_id                  (visit identifier; baseline often "ses-00A")
+#
+# Rx Free-text Medication Labels (DHX)
+#   Before pregnancy knowledge ("a" stems):
+#     - ph_p_dhx__rx__label_001a
+#     - ph_p_dhx__rx__label_002a
+#     - ph_p_dhx__rx__label_003a
+#     - ph_p_dhx__rx__label_004a
+#   After pregnancy knowledge ("b" stems):
+#     - ph_p_dhx__rx__label_001b
+#     - ph_p_dhx__rx__label_002b
+#     - ph_p_dhx__rx__label_003b
+#     - ph_p_dhx__rx__label_004b
+#
+# Direct Substance Items (DHX structured fields)
+#   Alcohol:
+#     - ph_p_dhx__alc_001a, ph_p_dhx__alc_001b
+#     - ph_p_dhx__alc_001a__01/__02/__03, ph_p_dhx__alc_001b__01/__02/__03
+#   Marijuana:
+#     - ph_p_dhx__mj_001a,  ph_p_dhx__mj_001b
+#     - ph_p_dhx__mj_001a__01, ph_p_dhx__mj_001b__01
+#   Nicotine/tobacco:
+#     - ph_p_dhx__nic_001a, ph_p_dhx__nic_001b
+#     - ph_p_dhx__nic_001a__01, ph_p_dhx__nic_001b__01
+#   Cocaine/crack:
+#     - ph_p_dhx__coc_001a, ph_p_dhx__coc_001b
+#     - ph_p_dhx__coc_001a__01, ph_p_dhx__coc_001b__01
+#   Heroin/morphine (direct opioid informant):
+#     - ph_p_dhx__opi_001a, ph_p_dhx__opi_001b
+#     - ph_p_dhx__opi_001a__01, ph_p_dhx__opi_001b__01
+#   Caffeine (pregnancy-wide item only):
+#     - ph_p_dhx__caff_001
+#     - ph_p_dhx__caff_001__01/__02/__03
+#
+# ------------------------------------------------------------------------------
+# Key Implementation Notes
+# ------------------------------------------------------------------------------
+# * Medication class exposures are derived by searching Rx free-text label fields
+#   for predefined generic/brand term dictionaries using case-insensitive matching.
+# * Timing-specific “before/after” exposure flags are computed separately from the
+#   corresponding "_a" and "_b" Rx label columns.
+# * Binary exposure flags are coded as 0/1 integers; missing is recoded to 0 after
+#   detection to avoid NA propagation in downstream models.
+# * Direct substance exposures use both the Yes/No stem and quantity fields; any
+#   positive indication is treated as exposed.
+# * Opioid class exposure is harmonized by merging Rx free-text detection with the
+#   direct heroin/morphine DHX item.
+#
+# Collaborator Access
+# -------------------
+# Collaborators should email james.woodruff@nyspi.columbia.edu for the data file
+# or for guidance on harmonizing DHX fields across ABCD releases.
+################################################################################
 
 library(dplyr)
 library(stringr)
