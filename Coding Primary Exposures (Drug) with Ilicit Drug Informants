@@ -1,0 +1,950 @@
+############################################################
+# Using the Developmental History (Parent) Questionnaire,
+# we calculate gestational medication exposure scores
+# for a range of psychotropic classes.
+#
+# We use TWO informants:
+#   (1) Rx free-text labels: ph_p_dhx__rx__label_00Xa/00Xb
+#   (2) Direct substance items: alc/mj/nic/coc/opi/caff stems
+# 
+# Exposure definitions:
+#   - "before" = before knowledge of pregnancy (A stems)
+#   - "after"  = after knowledge of pregnancy (B stems)
+#   - "any"    = before OR after (or pregnancy-wide item for caffeine)
+#
+# Collaborators should email james.woodruff@nyspi.columbia.edu
+# for the data file.
+############################################################
+
+library(dplyr)
+library(stringr)
+
+############################################################
+# 1. DEFINE MEDICATION TERM DICTIONARIES BY CLASS
+############################################################
+
+# 1a) True SSRI terms (generic + brand)
+ssri_terms <- c(
+  # Fluoxetine
+  "fluoxetine", "prozac",
+  # Sertraline
+  "sertraline", "zoloft",
+  # Paroxetine
+  "paroxetine", "paxil",
+  # Citalopram
+  "citalopram", "celexa",
+  # Escitalopram
+  "escitalopram", "lexapro",
+  # Fluvoxamine
+  "fluvoxamine", "luvox"
+)
+
+# 1b) SNRI terms
+snri_terms <- c(
+  # Venlafaxine
+  "venlafaxine", "effexor",
+  # Duloxetine
+  "duloxetine", "cymbalta",
+  # Desvenlafaxine
+  "desvenlafaxine", "pristiq",
+  # Milnacipran / Levomilnacipran
+  "milnacipran", "savella",
+  "levomilnacipran", "fetzima"
+)
+
+# 1c) Other antidepressants (non-SSRI, non-SNRI)
+otheratd_terms <- c(
+  # Trazodone (SARI)
+  "trazodone", "desyrel",
+  # Bupropion (NDRI)
+  "bupropion", "wellbutrin",
+  # Mirtazapine (NaSSA)
+  "mirtazapine", "remeron",
+  # Vilazodone
+  "vilazodone", "viibryd",
+  # Tricyclics (TCAs)
+  "amitriptyline", "elavil",
+  "nortriptyline", "pamelor",
+  "imipramine", "tofranil",
+  "clomipramine", "anafranil",
+  # MAOIs
+  "phenelzine", "nardil",
+  "tranylcypromine", "parnate"
+)
+
+# 1d) Legacy non-SSRI antidepressant term set (for backwards compatibility)
+#     This is the union of SNRIs + other antidepressants.
+nonssriad_terms <- c(snri_terms, otheratd_terms)
+
+# 1e) Any antidepressant = SSRIs + all non-SSRIs
+antidepressant_terms <- c(ssri_terms, nonssriad_terms)
+
+# 1f) Anticonvulsants / mood stabilizers
+anticonvulsant_terms <- c(
+  "lamotrigine", "lamictal",
+  "carbamazepine", "tegretol",
+  "oxcarbazepine", "trileptal",
+  "valproate", "valproic", "divalproex", "depakote",
+  "topiramate", "topamax",
+  "gabapentin", "neurontin",
+  "pregabalin", "lyrica",
+  "levetiracetam", "keppra",
+  "lithium"
+)
+
+# 1g) Stimulants (ADHD medications)
+stimulant_terms <- c(
+  "methylphenidate", "ritalin", "concerta", "daytrana",
+  "dexmethylphenidate", "focalin",
+  "amphetamine", "dextroamphetamine",
+  "lisdexamfetamine", "vyvanse",
+  "adderall" # mixed amphetamine salts
+)
+
+# 1h) Sleep aids / sedative-hypnotics
+sleepaid_terms <- c(
+  "zolpidem", "ambien",
+  "eszopiclone", "lunesta",
+  "zaleplon", "sonata",
+  "temazepam", "restoril",
+  "triazolam", "halcion",
+  "doxepin", "silenor",
+  "ramelteon", "rozerem",
+  "suvorexant", "belsomra",
+  "lemborexant", "dayvigo",
+  "melatonin"
+)
+
+# 1i) Anxiolytics (benzodiazepines + related)
+anxiolytic_terms <- c(
+  # Benzodiazepines
+  "lorazepam", "ativan",
+  "alprazolam", "xanax",
+  "clonazepam", "klonopin",
+  "diazepam", "valium",
+  "chlordiazepoxide", "librium",
+  "oxazepam", "serax",
+  "temazepam", "restoril",
+  # Non-benzo anxiolytics
+  "buspirone", "buspar",
+  "hydroxyzine", "atarax", "vistaril"
+)
+
+# 1j) Antipsychotics
+antipsychotic_terms <- c(
+  "risperidone", "risperdal",
+  "quetiapine", "seroquel",
+  "olanzapine", "zyprexa",
+  "aripiprazole", "abilify",
+  "ziprasidone", "geodon",
+  "paliperidone", "invega",
+  "haloperidol", "haldol",
+  "clozapine", "clozaril",
+  "lurasidone", "latuda",
+  "asenapine", "saphris",
+  "iloperidone", "fanapt"
+)
+
+# 1k) Opioids (Rx free-text informant)
+opioid_terms <- c(
+  "morphine",
+  "codeine",
+  "oxycodone", "oxycontin", "percocet",
+  "hydrocodone", "vicodin", "norco", "lortab",
+  "hydromorphone", "dilaudid",
+  "fentanyl",
+  "tramadol",
+  "methadone",
+  "buprenorphine", "suboxone", "subutex",
+  "oxymorphone",
+  "tapentadol",
+  "heroin"
+)
+
+############################################################
+# 2. HELPER FUNCTIONS & KEY MEDICATION TEXT COLUMNS
+############################################################
+
+# Generic "contains any of these terms" detector (Rx free-text)
+contains_terms <- function(x, terms) {
+  x_clean <- tolower(ifelse(is.na(x), "", x))
+  str_detect(x_clean, str_c(terms, collapse = "|"))
+}
+
+# Rx text columns (DHQ labels)
+rx_before_vars <- c(
+  "ph_p_dhx__rx__label_001a",
+  "ph_p_dhx__rx__label_002a",
+  "ph_p_dhx__rx__label_003a",
+  "ph_p_dhx__rx__label_004a"
+)
+
+rx_after_vars <- c(
+  "ph_p_dhx__rx__label_001b",
+  "ph_p_dhx__rx__label_002b",
+  "ph_p_dhx__rx__label_003b",
+  "ph_p_dhx__rx__label_004b"
+)
+
+rx_all_vars <- c(rx_before_vars, rx_after_vars)
+
+# Safe NA helper used later
+`%||%` <- function(x, y) ifelse(is.na(x), y, x)
+
+# Direct DHX radio coding: Yes="1", No="0", Don't know="999"
+is_yes_dhx <- function(x) as.character(x) == "1"
+
+# Numeric positive detector for quantity fields
+is_pos <- function(x) {
+  suppressWarnings(!is.na(as.numeric(x)) & as.numeric(x) > 0)
+}
+
+############################################################
+# 3. PURE "ANYTIME DURING PREGNANCY" CLASS-LEVEL EXPOSURES
+#    (FROM Rx free-text ONLY)
+############################################################
+
+MED_DHQ_Data_xlsx <- MED_DHQ_Data_xlsx %>%
+  mutate(
+    # Antidepressants (as originally defined)
+    prenatal_antidepressant_exposure = as.integer(
+      if_any(all_of(rx_all_vars), ~ contains_terms(.x, antidepressant_terms))
+    ),
+    prenatal_ssri_exposure = as.integer(
+      if_any(all_of(rx_all_vars), ~ contains_terms(.x, ssri_terms))
+    ),
+    prenatal_nonssriad_exposure = as.integer(
+      if_any(all_of(rx_all_vars), ~ contains_terms(.x, nonssriad_terms))
+    ),
+
+    # Granular antidepressant classes
+    prenatal_snri_exposure = as.integer(
+      if_any(all_of(rx_all_vars), ~ contains_terms(.x, snri_terms))
+    ),
+    prenatal_otheratd_exposure = as.integer(
+      if_any(all_of(rx_all_vars), ~ contains_terms(.x, otheratd_terms))
+    ),
+
+    # Other psychotropic classes
+    prenatal_anticonvulsant_exposure = as.integer(
+      if_any(all_of(rx_all_vars), ~ contains_terms(.x, anticonvulsant_terms))
+    ),
+    prenatal_stimulant_exposure = as.integer(
+      if_any(all_of(rx_all_vars), ~ contains_terms(.x, stimulant_terms))
+    ),
+    prenatal_sleepaid_exposure = as.integer(
+      if_any(all_of(rx_all_vars), ~ contains_terms(.x, sleepaid_terms))
+    ),
+    prenatal_anxiolytic_exposure = as.integer(
+      if_any(all_of(rx_all_vars), ~ contains_terms(.x, anxiolytic_terms))
+    ),
+    prenatal_antipsychotic_exposure = as.integer(
+      if_any(all_of(rx_all_vars), ~ contains_terms(.x, antipsychotic_terms))
+    ),
+    prenatal_opioid_exposure = as.integer(
+      if_any(all_of(rx_all_vars), ~ contains_terms(.x, opioid_terms))
+    )
+  ) %>%
+  mutate(
+    across(
+      starts_with("prenatal_"),
+      ~ if_else(is.na(.x), 0L, .x)
+    )
+  )
+
+############################################################
+# 4. BEFORE / AFTER KNOWLEDGE OF PREGNANCY – CLASS FLAGS
+#    (FROM Rx free-text ONLY)
+############################################################
+
+MED_DHQ_Data_xlsx <- MED_DHQ_Data_xlsx %>%
+  mutate(
+    # Antidepressants
+    antidepressant_before = as.integer(
+      if_any(all_of(rx_before_vars), ~ contains_terms(.x, antidepressant_terms))
+    ),
+    antidepressant_after = as.integer(
+      if_any(all_of(rx_after_vars), ~ contains_terms(.x, antidepressant_terms))
+    ),
+
+    ssri_before = as.integer(
+      if_any(all_of(rx_before_vars), ~ contains_terms(.x, ssri_terms))
+    ),
+    ssri_after = as.integer(
+      if_any(all_of(rx_after_vars), ~ contains_terms(.x, ssri_terms))
+    ),
+
+    nonssriad_before = as.integer(
+      if_any(all_of(rx_before_vars), ~ contains_terms(.x, nonssriad_terms))
+    ),
+    nonssriad_after = as.integer(
+      if_any(all_of(rx_after_vars), ~ contains_terms(.x, nonssriad_terms))
+    ),
+
+    # SNRIs and other antidepressants
+    snri_before = as.integer(
+      if_any(all_of(rx_before_vars), ~ contains_terms(.x, snri_terms))
+    ),
+    snri_after = as.integer(
+      if_any(all_of(rx_after_vars), ~ contains_terms(.x, snri_terms))
+    ),
+
+    otheratd_before = as.integer(
+      if_any(all_of(rx_before_vars), ~ contains_terms(.x, otheratd_terms))
+    ),
+    otheratd_after = as.integer(
+      if_any(all_of(rx_after_vars), ~ contains_terms(.x, otheratd_terms))
+    ),
+
+    # Other psychotropic classes
+    anticonvulsant_before = as.integer(
+      if_any(all_of(rx_before_vars), ~ contains_terms(.x, anticonvulsant_terms))
+    ),
+    anticonvulsant_after = as.integer(
+      if_any(all_of(rx_after_vars), ~ contains_terms(.x, anticonvulsant_terms))
+    ),
+
+    stimulant_before = as.integer(
+      if_any(all_of(rx_before_vars), ~ contains_terms(.x, stimulant_terms))
+    ),
+    stimulant_after = as.integer(
+      if_any(all_of(rx_after_vars), ~ contains_terms(.x, stimulant_terms))
+    ),
+
+    sleepaid_before = as.integer(
+      if_any(all_of(rx_before_vars), ~ contains_terms(.x, sleepaid_terms))
+    ),
+    sleepaid_after = as.integer(
+      if_any(all_of(rx_after_vars), ~ contains_terms(.x, sleepaid_terms))
+    ),
+
+    anxiolytic_before = as.integer(
+      if_any(all_of(rx_before_vars), ~ contains_terms(.x, anxiolytic_terms))
+    ),
+    anxiolytic_after = as.integer(
+      if_any(all_of(rx_after_vars), ~ contains_terms(.x, anxiolytic_terms))
+    ),
+
+    antipsychotic_before = as.integer(
+      if_any(all_of(rx_before_vars), ~ contains_terms(.x, antipsychotic_terms))
+    ),
+    antipsychotic_after = as.integer(
+      if_any(all_of(rx_after_vars), ~ contains_terms(.x, antipsychotic_terms))
+    ),
+
+    opioid_before = as.integer(
+      if_any(all_of(rx_before_vars), ~ contains_terms(.x, opioid_terms))
+    ),
+    opioid_after = as.integer(
+      if_any(all_of(rx_after_vars), ~ contains_terms(.x, opioid_terms))
+    )
+  ) %>%
+  mutate(
+    across(
+      ends_with("_before") | ends_with("_after"),
+      ~ if_else(is.na(.x), 0L, .x)
+    ),
+
+    # "BEFORE ONLY" flags
+    antidepressant_before_only = as.integer(antidepressant_before == 1L & antidepressant_after == 0L),
+    ssri_before_only           = as.integer(ssri_before           == 1L & ssri_after           == 0L),
+    nonssriad_before_only      = as.integer(nonssriad_before      == 1L & nonssriad_after      == 0L),
+
+    snri_before_only           = as.integer(snri_before           == 1L & snri_after           == 0L),
+    otheratd_before_only       = as.integer(otheratd_before       == 1L & otheratd_after       == 0L),
+
+    anticonvulsant_before_only = as.integer(anticonvulsant_before == 1L & anticonvulsant_after == 0L),
+    stimulant_before_only      = as.integer(stimulant_before      == 1L & stimulant_after      == 0L),
+    sleepaid_before_only       = as.integer(sleepaid_before       == 1L & sleepaid_after       == 0L),
+    anxiolytic_before_only     = as.integer(anxiolytic_before     == 1L & anxiolytic_after     == 0L),
+    antipsychotic_before_only  = as.integer(antipsychotic_before  == 1L & antipsychotic_after  == 0L),
+    opioid_before_only         = as.integer(opioid_before         == 1L & opioid_after         == 0L),
+
+    # "AFTER ONLY" flags
+    antidepressant_after_only = as.integer(antidepressant_before == 0L & antidepressant_after == 1L),
+    ssri_after_only           = as.integer(ssri_before           == 0L & ssri_after           == 1L),
+    nonssriad_after_only      = as.integer(nonssriad_before      == 0L & nonssriad_after      == 1L),
+
+    snri_after_only           = as.integer(snri_before           == 0L & snri_after           == 1L),
+    otheratd_after_only       = as.integer(otheratd_before       == 0L & otheratd_after       == 1L),
+
+    anticonvulsant_after_only = as.integer(anticonvulsant_before == 0L & anticonvulsant_after == 1L),
+    stimulant_after_only      = as.integer(stimulant_before      == 0L & stimulant_after      == 1L),
+    sleepaid_after_only       = as.integer(sleepaid_before       == 0L & sleepaid_after       == 1L),
+    anxiolytic_after_only     = as.integer(anxiolytic_before     == 0L & anxiolytic_after     == 1L),
+    antipsychotic_after_only  = as.integer(antipsychotic_before  == 0L & antipsychotic_after  == 1L),
+    opioid_after_only         = as.integer(opioid_before         == 0L & opioid_after         == 1L),
+
+    # BOTH before AND after flags
+    antidepressant_before_and_after = as.integer(antidepressant_before == 1L & antidepressant_after == 1L),
+    ssri_before_and_after           = as.integer(ssri_before           == 1L & ssri_after           == 1L),
+    nonssriad_before_and_after      = as.integer(nonssriad_before      == 1L & nonssriad_after      == 1L),
+
+    snri_before_and_after           = as.integer(snri_before           == 1L & snri_after           == 1L),
+    otheratd_before_and_after       = as.integer(otheratd_before       == 1L & otheratd_after       == 1L),
+
+    anticonvulsant_before_and_after = as.integer(anticonvulsant_before == 1L & anticonvulsant_after == 1L),
+    stimulant_before_and_after      = as.integer(stimulant_before      == 1L & stimulant_after      == 1L),
+    sleepaid_before_and_after       = as.integer(sleepaid_before       == 1L & sleepaid_after       == 1L),
+    anxiolytic_before_and_after     = as.integer(anxiolytic_before     == 1L & anxiolytic_after     == 1L),
+    antipsychotic_before_and_after  = as.integer(antipsychotic_before  == 1L & antipsychotic_after  == 1L),
+    opioid_before_and_after         = as.integer(opioid_before         == 1L & opioid_after         == 1L)
+  )
+
+############################################################
+# 5. BUILD COMBINED TEXT COLUMNS (BEFORE / AFTER / ALL)
+############################################################
+
+MED_DHQ_Data_xlsx <- MED_DHQ_Data_xlsx %>%
+  mutate(
+    across(all_of(rx_all_vars), as.character),
+    meds_before_text = do.call(paste, c(across(all_of(rx_before_vars)), sep = " ")),
+    meds_after_text  = do.call(paste, c(across(all_of(rx_after_vars)),  sep = " ")),
+    meds_all_text    = paste(meds_before_text, meds_after_text),
+
+    meds_before_text = tolower(meds_before_text),
+    meds_after_text  = tolower(meds_after_text),
+    meds_all_text    = tolower(meds_all_text)
+  )
+
+############################################################
+# 6. CLASS-LEVEL DRUG TEXT STRINGS VIA collapse_hits()
+############################################################
+
+collapse_hits <- function(text_vec, pattern) {
+  text_vec_lower <- tolower(text_vec %||% "")
+  hits_list <- stringr::str_extract_all(text_vec_lower, pattern)
+  vapply(hits_list, function(hits) {
+    hits <- unique(hits[!is.na(hits) & hits != ""])
+    if (length(hits) == 0) NA_character_ else paste(hits, collapse = "; ")
+  }, FUN.VALUE = character(1))
+}
+
+# Patterns for each class
+pattern_antidepressant   <- str_c(antidepressant_terms,   collapse = "|")
+pattern_ssri             <- str_c(ssri_terms,             collapse = "|")
+pattern_nonssriad        <- str_c(nonssriad_terms,        collapse = "|")
+pattern_snri             <- str_c(snri_terms,             collapse = "|")
+pattern_otheratd         <- str_c(otheratd_terms,         collapse = "|")
+pattern_anticonvulsant   <- str_c(anticonvulsant_terms,   collapse = "|")
+pattern_stimulant        <- str_c(stimulant_terms,        collapse = "|")
+pattern_sleepaid         <- str_c(sleepaid_terms,         collapse = "|")
+pattern_anxiolytic       <- str_c(anxiolytic_terms,       collapse = "|")
+pattern_antipsychotic    <- str_c(antipsychotic_terms,    collapse = "|")
+pattern_opioid           <- str_c(opioid_terms,           collapse = "|")
+
+# Compute collapsed class-level drug strings
+ant_all_drugs    <- collapse_hits(MED_DHQ_Data_xlsx$meds_all_text,    pattern_antidepressant)
+ant_before_drugs <- collapse_hits(MED_DHQ_Data_xlsx$meds_before_text, pattern_antidepressant)
+ant_after_drugs  <- collapse_hits(MED_DHQ_Data_xlsx$meds_after_text,  pattern_antidepressant)
+
+ssri_all_drugs    <- collapse_hits(MED_DHQ_Data_xlsx$meds_all_text,    pattern_ssri)
+ssri_before_drugs <- collapse_hits(MED_DHQ_Data_xlsx$meds_before_text, pattern_ssri)
+ssri_after_drugs  <- collapse_hits(MED_DHQ_Data_xlsx$meds_after_text,  pattern_ssri)
+
+non_all_drugs    <- collapse_hits(MED_DHQ_Data_xlsx$meds_all_text,    pattern_nonssriad)
+non_before_drugs <- collapse_hits(MED_DHQ_Data_xlsx$meds_before_text, pattern_nonssriad)
+non_after_drugs  <- collapse_hits(MED_DHQ_Data_xlsx$meds_after_text,  pattern_nonssriad)
+
+snri_all_drugs    <- collapse_hits(MED_DHQ_Data_xlsx$meds_all_text,    pattern_snri)
+snri_before_drugs <- collapse_hits(MED_DHQ_Data_xlsx$meds_before_text, pattern_snri)
+snri_after_drugs  <- collapse_hits(MED_DHQ_Data_xlsx$meds_after_text,  pattern_snri)
+
+otheratd_all_drugs    <- collapse_hits(MED_DHQ_Data_xlsx$meds_all_text,    pattern_otheratd)
+otheratd_before_drugs <- collapse_hits(MED_DHQ_Data_xlsx$meds_before_text, pattern_otheratd)
+otheratd_after_drugs  <- collapse_hits(MED_DHQ_Data_xlsx$meds_after_text,  pattern_otheratd)
+
+anticonvulsant_all_drugs    <- collapse_hits(MED_DHQ_Data_xlsx$meds_all_text,    pattern_anticonvulsant)
+anticonvulsant_before_drugs <- collapse_hits(MED_DHQ_Data_xlsx$meds_before_text, pattern_anticonvulsant)
+anticonvulsant_after_drugs  <- collapse_hits(MED_DHQ_Data_xlsx$meds_after_text,  pattern_anticonvulsant)
+
+stimulant_all_drugs    <- collapse_hits(MED_DHQ_Data_xlsx$meds_all_text,    pattern_stimulant)
+stimulant_before_drugs <- collapse_hits(MED_DHQ_Data_xlsx$meds_before_text, pattern_stimulant)
+stimulant_after_drugs  <- collapse_hits(MED_DHQ_Data_xlsx$meds_after_text,  pattern_stimulant)
+
+sleepaid_all_drugs    <- collapse_hits(MED_DHQ_Data_xlsx$meds_all_text,    pattern_sleepaid)
+sleepaid_before_drugs <- collapse_hits(MED_DHQ_Data_xlsx$meds_before_text, pattern_sleepaid)
+sleepaid_after_drugs  <- collapse_hits(MED_DHQ_Data_xlsx$meds_after_text,  pattern_sleepaid)
+
+anxiolytic_all_drugs    <- collapse_hits(MED_DHQ_Data_xlsx$meds_all_text,    pattern_anxiolytic)
+anxiolytic_before_drugs <- collapse_hits(MED_DHQ_Data_xlsx$meds_before_text, pattern_anxiolytic)
+anxiolytic_after_drugs  <- collapse_hits(MED_DHQ_Data_xlsx$meds_after_text,  pattern_anxiolytic)
+
+antipsychotic_all_drugs    <- collapse_hits(MED_DHQ_Data_xlsx$meds_all_text,    pattern_antipsychotic)
+antipsychotic_before_drugs <- collapse_hits(MED_DHQ_Data_xlsx$meds_before_text, pattern_antipsychotic)
+antipsychotic_after_drugs  <- collapse_hits(MED_DHQ_Data_xlsx$meds_after_text,  pattern_antipsychotic)
+
+opioid_all_drugs    <- collapse_hits(MED_DHQ_Data_xlsx$meds_all_text,    pattern_opioid)
+opioid_before_drugs <- collapse_hits(MED_DHQ_Data_xlsx$meds_before_text, pattern_opioid)
+opioid_after_drugs  <- collapse_hits(MED_DHQ_Data_xlsx$meds_after_text,  pattern_opioid)
+
+############################################################
+# 7. ATTACH CLASS-LEVEL *_drug VARIABLES (Rx free-text ONLY)
+############################################################
+
+MED_DHQ_Data_xlsx <- MED_DHQ_Data_xlsx %>%
+  mutate(
+    # ANY ANTIDEPRESSANT
+    prenatal_antidepressant_exposure_drug = if_else(
+      prenatal_antidepressant_exposure == 1L, ant_all_drugs, NA_character_
+    ),
+    antidepressant_before_drug = if_else(
+      antidepressant_before == 1L, ant_before_drugs, NA_character_
+    ),
+    antidepressant_after_drug = if_else(
+      antidepressant_after == 1L, ant_after_drugs, NA_character_
+    ),
+    antidepressant_before_only_drug = if_else(
+      antidepressant_before_only == 1L, ant_before_drugs, NA_character_
+    ),
+    antidepressant_after_only_drug = if_else(
+      antidepressant_after_only == 1L, ant_after_drugs, NA_character_
+    ),
+    antidepressant_before_and_after_drug = if_else(
+      antidepressant_before_and_after == 1L, ant_all_drugs, NA_character_
+    ),
+
+    # SSRIs
+    prenatal_ssri_exposure_drug = if_else(
+      prenatal_ssri_exposure == 1L, ssri_all_drugs, NA_character_
+    ),
+    ssri_before_drug = if_else(
+      ssri_before == 1L, ssri_before_drugs, NA_character_
+    ),
+    ssri_after_drug = if_else(
+      ssri_after == 1L, ssri_after_drugs, NA_character_
+    ),
+    ssri_before_only_drug = if_else(
+      ssri_before_only == 1L, ssri_before_drugs, NA_character_
+    ),
+    ssri_after_only_drug = if_else(
+      ssri_after_only == 1L, ssri_after_drugs, NA_character_
+    ),
+    ssri_before_and_after_drug = if_else(
+      ssri_before_and_after == 1L, ssri_all_drugs, NA_character_
+    ),
+
+    # NON-SSRI ADs (legacy)
+    prenatal_nonssriad_exposure_drug = if_else(
+      prenatal_nonssriad_exposure == 1L, non_all_drugs, NA_character_
+    ),
+    nonssriad_before_drug = if_else(
+      nonssriad_before == 1L, non_before_drugs, NA_character_
+    ),
+    nonssriad_after_drug = if_else(
+      nonssriad_after == 1L, non_after_drugs, NA_character_
+    ),
+    nonssriad_before_only_drug = if_else(
+      nonssriad_before_only == 1L, non_before_drugs, NA_character_
+    ),
+    nonssriad_after_only_drug = if_else(
+      nonssriad_after_only == 1L, non_after_drugs, NA_character_
+    ),
+    nonssriad_before_and_after_drug = if_else(
+      nonssriad_before_and_after == 1L, non_all_drugs, NA_character_
+    ),
+
+    # SNRIs
+    prenatal_snri_exposure_drug = if_else(
+      prenatal_snri_exposure == 1L, snri_all_drugs, NA_character_
+    ),
+    snri_before_drug = if_else(
+      snri_before == 1L, snri_before_drugs, NA_character_
+    ),
+    snri_after_drug = if_else(
+      snri_after == 1L, snri_after_drugs, NA_character_
+    ),
+    snri_before_only_drug = if_else(
+      snri_before_only == 1L, snri_before_drugs, NA_character_
+    ),
+    snri_after_only_drug = if_else(
+      snri_after_only == 1L, snri_after_drugs, NA_character_
+    ),
+    snri_before_and_after_drug = if_else(
+      snri_before_and_after == 1L, snri_all_drugs, NA_character_
+    ),
+
+    # Other antidepressants
+    prenatal_otheratd_exposure_drug = if_else(
+      prenatal_otheratd_exposure == 1L, otheratd_all_drugs, NA_character_
+    ),
+    otheratd_before_drug = if_else(
+      otheratd_before == 1L, otheratd_before_drugs, NA_character_
+    ),
+    otheratd_after_drug = if_else(
+      otheratd_after == 1L, otheratd_after_drugs, NA_character_
+    ),
+    otheratd_before_only_drug = if_else(
+      otheratd_before_only == 1L, otheratd_before_drugs, NA_character_
+    ),
+    otheratd_after_only_drug = if_else(
+      otheratd_after_only == 1L, otheratd_after_drugs, NA_character_
+    ),
+    otheratd_before_and_after_drug = if_else(
+      otheratd_before_and_after == 1L, otheratd_all_drugs, NA_character_
+    ),
+
+    # Anticonvulsants / mood stabilizers
+    prenatal_anticonvulsant_exposure_drug = if_else(
+      prenatal_anticonvulsant_exposure == 1L, anticonvulsant_all_drugs, NA_character_
+    ),
+    anticonvulsant_before_drug = if_else(
+      anticonvulsant_before == 1L, anticonvulsant_before_drugs, NA_character_
+    ),
+    anticonvulsant_after_drug = if_else(
+      anticonvulsant_after == 1L, anticonvulsant_after_drugs, NA_character_
+    ),
+    anticonvulsant_before_only_drug = if_else(
+      anticonvulsant_before_only == 1L, anticonvulsant_before_drugs, NA_character_
+    ),
+    anticonvulsant_after_only_drug = if_else(
+      anticonvulsant_after_only == 1L, anticonvulsant_after_drugs, NA_character_
+    ),
+    anticonvulsant_before_and_after_drug = if_else(
+      anticonvulsant_before_and_after == 1L, anticonvulsant_all_drugs, NA_character_
+    ),
+
+    # Stimulants
+    prenatal_stimulant_exposure_drug = if_else(
+      prenatal_stimulant_exposure == 1L, stimulant_all_drugs, NA_character_
+    ),
+    stimulant_before_drug = if_else(
+      stimulant_before == 1L, stimulant_before_drugs, NA_character_
+    ),
+    stimulant_after_drug = if_else(
+      stimulant_after == 1L, stimulant_after_drugs, NA_character_
+    ),
+    stimulant_before_only_drug = if_else(
+      stimulant_before_only == 1L, stimulant_before_drugs, NA_character_
+    ),
+    stimulant_after_only_drug = if_else(
+      stimulant_after_only == 1L, stimulant_after_drugs, NA_character_
+    ),
+    stimulant_before_and_after_drug = if_else(
+      stimulant_before_and_after == 1L, stimulant_all_drugs, NA_character_
+    ),
+
+    # Sleep aids
+    prenatal_sleepaid_exposure_drug = if_else(
+      prenatal_sleepaid_exposure == 1L, sleepaid_all_drugs, NA_character_
+    ),
+    sleepaid_before_drug = if_else(
+      sleepaid_before == 1L, sleepaid_before_drugs, NA_character_
+    ),
+    sleepaid_after_drug = if_else(
+      sleepaid_after == 1L, sleepaid_after_drugs, NA_character_
+    ),
+    sleepaid_before_only_drug = if_else(
+      sleepaid_before_only == 1L, sleepaid_before_drugs, NA_character_
+    ),
+    sleepaid_after_only_drug = if_else(
+      sleepaid_after_only == 1L, sleepaid_after_drugs, NA_character_
+    ),
+    sleepaid_before_and_after_drug = if_else(
+      sleepaid_before_and_after == 1L, sleepaid_all_drugs, NA_character_
+    ),
+
+    # Anxiolytics
+    prenatal_anxiolytic_exposure_drug = if_else(
+      prenatal_anxiolytic_exposure == 1L, anxiolytic_all_drugs, NA_character_
+    ),
+    anxiolytic_before_drug = if_else(
+      anxiolytic_before == 1L, anxiolytic_before_drugs, NA_character_
+    ),
+    anxiolytic_after_drug = if_else(
+      anxiolytic_after == 1L, anxiolytic_after_drugs, NA_character_
+    ),
+    anxiolytic_before_only_drug = if_else(
+      anxiolytic_before_only == 1L, anxiolytic_before_drugs, NA_character_
+    ),
+    anxiolytic_after_only_drug = if_else(
+      anxiolytic_after_only == 1L, anxiolytic_after_drugs, NA_character_
+    ),
+    anxiolytic_before_and_after_drug = if_else(
+      anxiolytic_before_and_after == 1L, anxiolytic_all_drugs, NA_character_
+    ),
+
+    # Antipsychotics
+    prenatal_antipsychotic_exposure_drug = if_else(
+      prenatal_antipsychotic_exposure == 1L, antipsychotic_all_drugs, NA_character_
+    ),
+    antipsychotic_before_drug = if_else(
+      antipsychotic_before == 1L, antipsychotic_before_drugs, NA_character_
+    ),
+    antipsychotic_after_drug = if_else(
+      antipsychotic_after == 1L, antipsychotic_after_drugs, NA_character_
+    ),
+    antipsychotic_before_only_drug = if_else(
+      antipsychotic_before_only == 1L, antipsychotic_before_drugs, NA_character_
+    ),
+    antipsychotic_after_only_drug = if_else(
+      antipsychotic_after_only == 1L, antipsychotic_after_drugs, NA_character_
+    ),
+    antipsychotic_before_and_after_drug = if_else(
+      antipsychotic_before_and_after == 1L, antipsychotic_all_drugs, NA_character_
+    ),
+
+    # Opioids (Rx free-text only at this stage)
+    prenatal_opioid_exposure_drug = if_else(
+      prenatal_opioid_exposure == 1L, opioid_all_drugs, NA_character_
+    ),
+    opioid_before_drug = if_else(
+      opioid_before == 1L, opioid_before_drugs, NA_character_
+    ),
+    opioid_after_drug = if_else(
+      opioid_after == 1L, opioid_after_drugs, NA_character_
+    ),
+    opioid_before_only_drug = if_else(
+      opioid_before_only == 1L, opioid_before_drugs, NA_character_
+    ),
+    opioid_after_only_drug = if_else(
+      opioid_after_only == 1L, opioid_after_drugs, NA_character_
+    ),
+    opioid_before_and_after_drug = if_else(
+      opioid_before_and_after == 1L, opioid_all_drugs, NA_character_
+    )
+  )
+
+############################################################
+# 8. OPTIONAL: LIMIT TO BASELINE SESSION ONLY (ses-00A)
+############################################################
+
+MED_DHQ_Data_xlsx <- MED_DHQ_Data_xlsx %>%
+  filter(session_id == "ses-00A")
+
+############################################################
+# 9. DIRECT SUBSTANCE EXPOSURES (alc/caff/coc/mj/nic/opi stems)
+#    - Create parallel before/after/any variables
+#    - Merge heroin/morphine item into opioid_* class flags
+############################################################
+
+MED_DHQ_Data_xlsx <- MED_DHQ_Data_xlsx %>%
+  mutate(
+    # -------------------------
+    # Alcohol (before/after/any)
+    # -------------------------
+    alc_before = as.integer(
+      is_yes_dhx(ph_p_dhx__alc_001a) |
+        is_pos(ph_p_dhx__alc_001a__01) |
+        is_pos(ph_p_dhx__alc_001a__02) |
+        is_pos(ph_p_dhx__alc_001a__03)
+    ),
+    alc_after = as.integer(
+      is_yes_dhx(ph_p_dhx__alc_001b) |
+        is_pos(ph_p_dhx__alc_001b__01) |
+        is_pos(ph_p_dhx__alc_001b__02) |
+        is_pos(ph_p_dhx__alc_001b__03)
+    ),
+    alc_any = as.integer(alc_before == 1L | alc_after == 1L),
+
+    # -------------------------
+    # Cocaine/Crack (before/after/any)
+    # -------------------------
+    coc_before = as.integer(
+      is_yes_dhx(ph_p_dhx__coc_001a) |
+        is_pos(ph_p_dhx__coc_001a__01)
+    ),
+    coc_after = as.integer(
+      is_yes_dhx(ph_p_dhx__coc_001b) |
+        is_pos(ph_p_dhx__coc_001b__01)
+    ),
+    coc_any = as.integer(coc_before == 1L | coc_after == 1L),
+
+    # -------------------------
+    # Marijuana (before/after/any)
+    # -------------------------
+    mj_before = as.integer(
+      is_yes_dhx(ph_p_dhx__mj_001a) |
+        is_pos(ph_p_dhx__mj_001a__01)
+    ),
+    mj_after = as.integer(
+      is_yes_dhx(ph_p_dhx__mj_001b) |
+        is_pos(ph_p_dhx__mj_001b__01)
+    ),
+    mj_any = as.integer(mj_before == 1L | mj_after == 1L),
+
+    # -------------------------
+    # Nicotine/Tobacco (before/after/any)
+    # -------------------------
+    nic_before = as.integer(
+      is_yes_dhx(ph_p_dhx__nic_001a) |
+        is_pos(ph_p_dhx__nic_001a__01)
+    ),
+    nic_after = as.integer(
+      is_yes_dhx(ph_p_dhx__nic_001b) |
+        is_pos(ph_p_dhx__nic_001b__01)
+    ),
+    nic_any = as.integer(nic_before == 1L | nic_after == 1L),
+
+    # -------------------------
+    # Heroin/Morphine (direct opioid informant)
+    # -------------------------
+    opi_hm_before = as.integer(
+      is_yes_dhx(ph_p_dhx__opi_001a) |
+        is_pos(ph_p_dhx__opi_001a__01)
+    ),
+    opi_hm_after = as.integer(
+      is_yes_dhx(ph_p_dhx__opi_001b) |
+        is_pos(ph_p_dhx__opi_001b__01)
+    ),
+    opi_hm_any = as.integer(opi_hm_before == 1L | opi_hm_after == 1L),
+
+    # -------------------------
+    # Caffeine (pregnancy-wide item only; no before/after in DHX)
+    # -------------------------
+    caff_any = as.integer(
+      is_yes_dhx(ph_p_dhx__caff_001) |
+        is_pos(ph_p_dhx__caff_001__01) |
+        is_pos(ph_p_dhx__caff_001__02) |
+        is_pos(ph_p_dhx__caff_001__03)
+    )
+  ) %>%
+  mutate(
+    # ------------------------------------------------------
+    # MERGE DIRECT OPI ITEM INTO EXISTING OPIOID CLASS FLAGS
+    # (prevents missing opioid users who didn't list it in Rx text)
+    # ------------------------------------------------------
+    opioid_before = as.integer(opioid_before == 1L | opi_hm_before == 1L),
+    opioid_after  = as.integer(opioid_after  == 1L | opi_hm_after  == 1L),
+
+    prenatal_opioid_exposure = as.integer(prenatal_opioid_exposure == 1L | opi_hm_any == 1L)
+  ) %>%
+  mutate(
+    # Recompute only/both after opioid merge
+    opioid_before_only      = as.integer(opioid_before == 1L & opioid_after == 0L),
+    opioid_after_only       = as.integer(opioid_before == 0L & opioid_after == 1L),
+    opioid_before_and_after = as.integer(opioid_before == 1L & opioid_after == 1L)
+  )
+
+############################################################
+# 10. PER-DRUG BINARY VARIABLES (BEFORE / AFTER / ANY)
+#     (Rx free-text based, across psychotropic classes)
+############################################################
+
+drug_patterns <- list(
+  # SSRIs
+  fluoxetine   = c("fluoxetine", "prozac"),
+  sertraline   = c("sertraline", "zoloft"),
+  paroxetine   = c("paroxetine", "paxil"),
+  citalopram   = c("citalopram", "celexa"),
+  escitalopram = c("escitalopram", "lexapro"),
+  fluvoxamine  = c("fluvoxamine", "luvox"),
+
+  # SNRIs
+  venlafaxine  = c("venlafaxine", "effexor"),
+  duloxetine   = c("duloxetine", "cymbalta"),
+  desvenlafaxine = c("desvenlafaxine", "pristiq"),
+  milnacipran  = c("milnacipran", "savella"),
+  levomilnacipran = c("levomilnacipran", "fetzima"),
+
+  # Other antidepressants
+  trazodone    = c("trazodone", "desyrel"),
+  bupropion    = c("bupropion", "wellbutrin"),
+  mirtazapine  = c("mirtazapine", "remeron"),
+  vilazodone   = c("vilazodone", "viibryd"),
+  amitriptyline = c("amitriptyline", "elavil"),
+  nortriptyline = c("nortriptyline", "pamelor"),
+  imipramine    = c("imipramine", "tofranil"),
+  clomipramine  = c("clomipramine", "anafranil"),
+  phenelzine    = c("phenelzine", "nardil"),
+  tranylcypromine = c("tranylcypromine", "parnate"),
+
+  # Anticonvulsants / mood stabilizers
+  lamotrigine  = c("lamotrigine", "lamictal"),
+  carbamazepine = c("carbamazepine", "tegretol"),
+  oxcarbazepine = c("oxcarbazepine", "trileptal"),
+  valproate    = c("valproate", "valproic", "divalproex", "depakote"),
+  topiramate   = c("topiramate", "topamax"),
+  gabapentin   = c("gabapentin", "neurontin"),
+  pregabalin   = c("pregabalin", "lyrica"),
+  levetiracetam = c("levetiracetam", "keppra"),
+  lithium      = c("lithium"),
+
+  # Stimulants
+  methylphenidate   = c("methylphenidate", "ritalin", "concerta", "daytrana"),
+  dexmethylphenidate = c("dexmethylphenidate", "focalin"),
+  amphetamine       = c("amphetamine", "dextroamphetamine"),
+  lisdexamfetamine  = c("lisdexamfetamine", "vyvanse"),
+  adderall          = c("adderall"),
+
+  # Sleep aids
+  zolpidem   = c("zolpidem", "ambien"),
+  eszopiclone = c("eszopiclone", "lunesta"),
+  zaleplon   = c("zaleplon", "sonata"),
+  temazepam  = c("temazepam", "restoril"),
+  triazolam  = c("triazolam", "halcion"),
+  melatonin  = c("melatonin"),
+  doxepin    = c("doxepin", "silenor"),
+  ramelteon  = c("ramelteon", "rozerem"),
+  suvorexant = c("suvorexant", "belsomra"),
+
+  # Anxiolytics
+  lorazepam  = c("lorazepam", "ativan"),
+  alprazolam = c("alprazolam", "xanax"),
+  clonazepam = c("clonazepam", "klonopin"),
+  diazepam   = c("diazepam", "valium"),
+  chlordiazepoxide = c("chlordiazepoxide", "librium"),
+  oxazepam   = c("oxazepam", "serax"),
+  buspirone  = c("buspirone", "buspar"),
+  hydroxyzine = c("hydroxyzine", "atarax", "vistaril"),
+
+  # Antipsychotics
+  risperidone = c("risperidone", "risperdal"),
+  quetiapine  = c("quetiapine", "seroquel"),
+  olanzapine  = c("olanzapine", "zyprexa"),
+  aripiprazole = c("aripiprazole", "abilify"),
+  ziprasidone = c("ziprasidone", "geodon"),
+  paliperidone = c("paliperidone", "invega"),
+  haloperidol = c("haloperidol", "haldol"),
+  clozapine   = c("clozapine", "clozaril"),
+  lurasidone  = c("lurasidone", "latuda"),
+  asenapine   = c("asenapine", "saphris"),
+  iloperidone = c("iloperidone", "fanapt"),
+
+  # Opioids (Rx-text patterns; heroin/morphine direct item already merged above)
+  morphine   = c("morphine"),
+  codeine    = c("codeine"),
+  oxycodone  = c("oxycodone", "oxycontin", "percocet"),
+  hydrocodone = c("hydrocodone", "vicodin", "norco", "lortab"),
+  hydromorphone = c("hydromorphone", "dilaudid"),
+  fentanyl   = c("fentanyl"),
+  tramadol   = c("tramadol"),
+  methadone  = c("methadone"),
+  buprenorphine = c("buprenorphine", "suboxone", "subutex"),
+  oxymorphone = c("oxymorphone"),
+  tapentadol = c("tapentadol"),
+  heroin = c("heroin")
+)
+
+# Ensure meds_*_text are lower-case and non-NA
+MED_DHQ_Data_xlsx <- MED_DHQ_Data_xlsx %>%
+  mutate(
+    meds_before_text = tolower(meds_before_text %||% ""),
+    meds_after_text  = tolower(meds_after_text %||% ""),
+    meds_all_text    = tolower(meds_all_text %||% "")
+  )
+
+# Loop to create <drug>_before, <drug>_after, <drug>_any (Rx free-text)
+for (drug in names(drug_patterns)) {
+  pattern <- str_c(drug_patterns[[drug]], collapse = "|")
+
+  MED_DHQ_Data_xlsx <- MED_DHQ_Data_xlsx %>%
+    mutate(
+      !!paste0(drug, "_before") :=
+        as.integer(str_detect(meds_before_text %||% "", pattern)),
+      !!paste0(drug, "_after") :=
+        as.integer(str_detect(meds_after_text  %||% "", pattern)),
+      !!paste0(drug, "_any") :=
+        as.integer(str_detect(meds_all_text    %||% "", pattern))
+    )
+}
+
+############################################################
+# END OF STORY:
+# MED_DHQ_Data_xlsx now contains:
+# - Rx free-text class-level prenatal exposures (any / before / after / only / both)
+# - Rx free-text class-level *_drug text summaries
+# - Direct DHX substance exposures: alc/coc/mj/nic/opi_hm + caff_any
+# - Opioid class flags updated to include heroin/morphine direct item
+# - Drug-specific Rx text flags (<drug>_before/_after/_any)
+############################################################
