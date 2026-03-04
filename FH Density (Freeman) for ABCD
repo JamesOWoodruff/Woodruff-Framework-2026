@@ -1,0 +1,196 @@
+# Here, we calculate a family history score. which is based on Freeman et al.'s formula (PMID: 36797123 DOI: 10.1016/j.bpsc.2022.09.015)
+# We use this formula because there is precendent for its employment in a neuroimaging context
+# Collaborators should email james.woodruff@nyspi.columbia.edu for the data file
+
+
+library(dplyr)
+
+## ----------------------------------------
+## 1. Helper functions
+## ----------------------------------------
+
+clean_fh_binary <- function(x) {
+  x <- as.numeric(x)
+  ifelse(x %in% c(777, 888, 999), NA_real_,
+         ifelse(x == 1, 1,
+                ifelse(x == 0, 0, NA_real_)))
+}
+
+clean_fh_count <- function(x) {
+  x <- as.numeric(x)
+  ifelse(x %in% c(777, 888, 999), NA_real_, x)
+}
+
+## ----------------------------------------
+## 2. Column groups
+## ----------------------------------------
+
+full_dep_vars <- c(
+  "mh_p_famhx__dep__full__old_001",
+  "mh_p_famhx__dep__full__old_002",
+  "mh_p_famhx__dep__full__old_003",
+  "mh_p_famhx__dep__full__old_004",
+  "mh_p_famhx__dep__full__old_005",
+  "mh_p_famhx__dep__full__young_001",
+  "mh_p_famhx__dep__full__young_002",
+  "mh_p_famhx__dep__full__young_003",
+  "mh_p_famhx__dep__full__young_004",
+  "mh_p_famhx__dep__full__young_005",
+  "mh_p_famhx__dep__twin_001",
+  "mh_p_famhx__dep__twin_002"
+)
+
+half_dep_vars <- c(
+  "mh_p_famhx__dep__half__old_001",
+  "mh_p_famhx__dep__half__old_002",
+  "mh_p_famhx__dep__half__old_003",
+  "mh_p_famhx__dep__half__old_004",
+  "mh_p_famhx__dep__half__old_005",
+  "mh_p_famhx__dep__half__young_001",
+  "mh_p_famhx__dep__half__young_002",
+  "mh_p_famhx__dep__half__young_003",
+  "mh_p_famhx__dep__half__young_004",
+  "mh_p_famhx__dep__half__young_005"
+)
+
+mat_aunt_dep_vars <- c(
+  "mh_p_famhx__dep__mat__aunt_001",
+  "mh_p_famhx__dep__mat__aunt_002",
+  "mh_p_famhx__dep__mat__aunt_003",
+  "mh_p_famhx__dep__mat__aunt_004",
+  "mh_p_famhx__dep__mat__aunt_005"
+)
+
+pat_aunt_dep_vars <- c(
+  "mh_p_famhx__dep__pat__aunt_001",
+  "mh_p_famhx__dep__pat__aunt_002",
+  "mh_p_famhx__dep__pat__aunt_003",
+  "mh_p_famhx__dep__pat__aunt_004",
+  "mh_p_famhx__dep__pat__aunt_005"
+)
+
+mat_unc_dep_vars <- c(
+  "mh_p_famhx__dep__mat__unc_001",
+  "mh_p_famhx__dep__mat__unc_002",
+  "mh_p_famhx__dep__mat__unc_003",
+  "mh_p_famhx__dep__mat__unc_004",
+  "mh_p_famhx__dep__mat__unc_005"
+)
+
+pat_unc_dep_vars <- c(
+  "mh_p_famhx__dep__pat__unc_001",
+  "mh_p_famhx__dep__pat__unc_002",
+  "mh_p_famhx__dep__pat__unc_003",
+  "mh_p_famhx__dep__pat__unc_004",
+  "mh_p_famhx__dep__pat__unc_005"
+)
+
+## ----------------------------------------
+## 3. Compute Freeman-style FHD score
+## ----------------------------------------
+
+mh_p_famhx <- mh_p_famhx %>%
+  mutate(
+    # Parents & grandparents
+    fh_dep_mother = clean_fh_binary(mh_p_famhx__dep__moth_001),
+    fh_dep_father = clean_fh_binary(mh_p_famhx__dep__fath_001),
+
+    fh_dep_mat_gm = clean_fh_binary(mh_p_famhx__dep__mat__gmoth_001),
+    fh_dep_mat_gf = clean_fh_binary(mh_p_famhx__dep__mat__gfath_001),
+    fh_dep_pat_gm = clean_fh_binary(mh_p_famhx__dep__pat__gmoth_001),
+    fh_dep_pat_gf = clean_fh_binary(mh_p_famhx__dep__pat__gfath_001),
+
+    # Full siblings
+    n_full_sib_dep = rowSums(
+      across(all_of(full_dep_vars), clean_fh_binary),
+      na.rm = TRUE
+    ),
+    n_full_sib_total =
+      clean_fh_count(mh_p_famhx__full__bro_001) +
+      clean_fh_count(mh_p_famhx__full__sis_001),
+    prop_full_sib_dep = ifelse(
+      n_full_sib_total > 0,
+      n_full_sib_dep / n_full_sib_total,
+      0
+    ),
+
+    # Half siblings
+    n_half_sib_dep = rowSums(
+      across(all_of(half_dep_vars), clean_fh_binary),
+      na.rm = TRUE
+    ),
+    n_half_sib_total =
+      clean_fh_count(mh_p_famhx__half__bro_001) +
+      clean_fh_count(mh_p_famhx__half__sis_001),
+    prop_half_sib_dep = ifelse(
+      n_half_sib_total > 0,
+      n_half_sib_dep / n_half_sib_total,
+      0
+    ),
+
+    # Maternal aunts
+    n_mat_aunt_dep = rowSums(
+      across(all_of(mat_aunt_dep_vars), clean_fh_binary),
+      na.rm = TRUE
+    ),
+    n_mat_aunt_total = clean_fh_count(mh_p_famhx__mat__aunt_001),
+    prop_mat_aunt_dep = ifelse(
+      n_mat_aunt_total > 0,
+      n_mat_aunt_dep / n_mat_aunt_total,
+      0
+    ),
+
+    # Paternal aunts
+    n_pat_aunt_dep = rowSums(
+      across(all_of(pat_aunt_dep_vars), clean_fh_binary),
+      na.rm = TRUE
+    ),
+    n_pat_aunt_total = clean_fh_count(mh_p_famhx__pat__aunt_001),
+    prop_pat_aunt_dep = ifelse(
+      n_pat_aunt_total > 0,
+      n_pat_aunt_dep / n_pat_aunt_total,
+      0
+    ),
+
+    # Maternal uncles
+    n_mat_unc_dep = rowSums(
+      across(all_of(mat_unc_dep_vars), clean_fh_binary),
+      na.rm = TRUE
+    ),
+    n_mat_unc_total = clean_fh_count(mh_p_famhx__mat__unc_001),
+    prop_mat_unc_dep = ifelse(
+      n_mat_unc_total > 0,
+      n_mat_unc_dep / n_mat_unc_total,
+      0
+    ),
+
+    # Paternal uncles
+    n_pat_unc_dep = rowSums(
+      across(all_of(pat_unc_dep_vars), clean_fh_binary),
+      na.rm = TRUE
+    ),
+    n_pat_unc_total = clean_fh_count(mh_p_famhx__pat__unc_001),
+    prop_pat_unc_dep = ifelse(
+      n_pat_unc_total > 0,
+      n_pat_unc_dep / n_pat_unc_total,
+      0
+    ),
+
+    # Final Family History Density of depression
+    fhd_depression =
+      0.5  * fh_dep_mother +
+      0.5  * fh_dep_father +
+      0.25 * fh_dep_mat_gm +
+      0.25 * fh_dep_mat_gf +
+      0.25 * fh_dep_pat_gm +
+      0.25 * fh_dep_pat_gf +
+      0.5  * prop_full_sib_dep +
+      0.25 * prop_half_sib_dep +
+      0.25 * prop_mat_aunt_dep +
+      0.25 * prop_pat_aunt_dep +
+      0.25 * prop_mat_unc_dep +
+      0.25 * prop_pat_unc_dep
+  )
+
+# Quick check
+summary(mh_p_famhx$fhd_depression)
