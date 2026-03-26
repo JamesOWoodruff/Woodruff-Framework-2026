@@ -124,10 +124,10 @@ asr_covar_lookup <- list(
   mh_p_cbcl__synd__int_sum_max   = c("asr_dep_matched_max_c", "asr_anx_matched_max_c"),
   mh_p_cbcl__synd__ext_sum_mean  = c("asr_dep_mean_c", "asr_anx_mean_c"),
   mh_p_cbcl__synd__ext_sum_max   = c("asr_dep_matched_max_c", "asr_anx_matched_max_c"),
-  ysr_dsm_dep_sum_mean           = c("asr_dep_mean_c"),
-  ysr_dsm_dep_sum_max            = c("asr_dep_matched_max_c"),
-  ysr_dsm_anx_sum_mean           = c("asr_anx_mean_c"),
-  ysr_dsm_anx_sum_max            = c("asr_anx_matched_max_c")
+  ysr_dsm_dep_sum_mean           = c("asr_dep_mean_c", "asr_anx_mean_c"),
+  ysr_dsm_dep_sum_max            = c("asr_dep_matched_max_c", "asr_anx_matched_max_c"),
+  ysr_dsm_anx_sum_mean           = c("asr_dep_mean_c", "asr_anx_mean_c"),
+  ysr_dsm_anx_sum_max            = c("asr_dep_matched_max_c", "asr_anx_matched_max_c")
 )
 
 # -----------------------------
