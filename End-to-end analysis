@@ -98,8 +98,6 @@ outcome_labels <- c(
 
 # --- PS model base covariates (without ssri_before) ---
 ps_core_covars <- c(
-  "mh_p_asr__dsm__dep_sum",
-  "mh_p_asr__dsm__anx_sum",
   "mh_p_famhx__dep__moth_001",
   "mom_age_preg",
   "mat_race",
