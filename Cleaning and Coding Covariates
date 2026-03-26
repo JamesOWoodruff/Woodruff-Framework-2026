@@ -1,7 +1,8 @@
 ################################################################################
 # Woodruff & van Dijk Framework: Covariate Cleaning and Coding
 # REVISED: Added mat_race, mom_age_preg, planned_preg, prenatal_vit,
-#          mh_p_famhx__dep__moth_001; removed child sex and child race
+#          mh_p_famhx__dep__moth_001 (recode per PI guidance);
+#          removed child sex and child race
 ################################################################################
 
 library(dplyr)
@@ -71,16 +72,42 @@ Cov_baseline <- Cov_baseline %>%
       labels = c("No", "Yes")
     ),
 
-    # --- Mother history of depression: 777/888/999 -> NA, then factor ---
-    mh_p_famhx__dep__moth_001 = na_if(as.numeric(mh_p_famhx__dep__moth_001), 777),
-    mh_p_famhx__dep__moth_001 = na_if(mh_p_famhx__dep__moth_001, 888),
-    mh_p_famhx__dep__moth_001 = na_if(mh_p_famhx__dep__moth_001, 999),
+    # --- Maternal depression family history (recode per PI guidance) ---
+    # Logic:
+    #   mh_p_famhx_001 == 1 (has family history) AND
+    #   mh_p_famhx__dep_001 == 1 (depression in family) AND
+    #   mh_p_famhx__dep__moth_001 == 1 -> 1 (maternal dep history positive)
+    #
+    #   mh_p_famhx_001 == 1 AND mh_p_famhx__dep_001 == 0
+    #   -> 0 (family hx positive but no depression reported)
+    #
+    #   mh_p_famhx_001 == 1 AND mh_p_famhx__dep_001 == 1 AND
+    #   mh_p_famhx__dep__moth_001 == 0
+    #   -> 0 (depression in family but not in mother specifically)
+    #
+    #   All else -> NA
+    #
+    # Rationale: NAs in mh_p_famhx__dep__moth_001 previously treated as
+    # missing are in many cases true negatives (screener answered but no
+    # maternal dep reported). This recode recovers those cases.
+    .fhx  = as.numeric(mh_p_famhx_001),
+    .dep  = as.numeric(mh_p_famhx__dep_001),
+    .moth = as.numeric(mh_p_famhx__dep__moth_001),
+
+    mh_p_famhx__dep__moth_001 = case_when(
+      .fhx == 1 & .dep == 1 & .moth == 1  ~ 1L,
+      .fhx == 1 & .dep == 0               ~ 0L,
+      .fhx == 1 & .dep == 1 & .moth == 0  ~ 0L,
+      TRUE                                 ~ NA_integer_
+    ),
+
     mh_p_famhx__dep__moth_001 = factor(
       mh_p_famhx__dep__moth_001,
-      levels = c(0, 1),
+      levels = c(0L, 1L),
       labels = c("No", "Yes")
     )
-  )
+  ) %>%
+  select(-starts_with(".fhx"), -starts_with(".dep"), -starts_with(".moth"))
 
 # -----------------------------
 # 3) Derive mat_race from multi-select indicators
@@ -159,5 +186,3 @@ table(Cov_baseline$prenatal_vit, useNA = "ifany")
 table(Cov_baseline$mh_p_famhx__dep__moth_001, useNA = "ifany")
 table(Cov_baseline$mat_race, useNA = "ifany")
 summary(Cov_baseline$mom_age_preg)
-
-
