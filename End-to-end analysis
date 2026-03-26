@@ -1,23 +1,24 @@
-############################################################
+################################################################################
 # Woodruff & van Dijk Framework (end-to-end execution)
 # ATT weighting + balance diagnostics + weighted outcome models
 #
 # REVISED:
-#  - PS model updated: removed fhd_depression_c, child sex, child race,
-#    ssri_before, snri_before, otheratd_before; added nonssriad_before,
-#    mh_p_famhx__dep__moth_001, mom_age_preg, mat_race
-#  - Outcome model updated: _before covariates -> _after; child race ->
-#    mat_race; added mh_p_famhx__dep__moth_001, mom_age_preg,
-#    planned_preg, prenatal_vit, otheratd_after; removed fhd interaction
-#  - DR/interaction model removed for now
-#  - Restricted to biological mother reporters (ab_p_demo__relation_001 == 1)
-#  - SNRI users excluded (snri_before == 1 | snri_after == 1)
-#  - Four models varying ssri_before in PS and/or outcome model
-#  - All four model objects retained in memory for plotting script
+#  - asr_matched joined into analytic_df (4th join)
+#  - Models A/B/C/D replace old 1-4 structure:
+#      A: ssri_before in outcome only, no ASR in outcome
+#      B: ssri_before in outcome only, ASR in outcome
+#      C: ssri_before in neither, no ASR in outcome
+#      D: ssri_before in neither, ASR in outcome
+#  - 12 outcomes (8 original + 4 YSR DSM)
+#  - ASR covariates in outcome model vary by outcome type (max vs mean)
+#    and domain (dep vs anx) for models B and D
+#  - PS model: ASR vars removed, ssri_before never enters PS
+#  - fit_one_outcome: graceful skip for all-NA outcomes (ysr_dsm_dep)
+#  - NaN SEs from vcovHC passed through to results_key as informative flags
 #
-# Assumes these data.frames already exist:
-#   MED_DHQ_Data_xlsx, Cov_baseline, FH_Density, bpm_max_scores
-############################################################
+# Assumes these data.frames already exist in memory:
+#   MED_DHQ_Data_xlsx, Cov_baseline, FH_Density, bpm_max_scores, asr_matched
+################################################################################
 
 # -----------------------------
 # 0) Packages
@@ -36,15 +37,17 @@ library(tibble)
 analytic_df <- MED_DHQ_Data_xlsx %>%
   left_join(Cov_baseline,   by = "participant_id") %>%
   left_join(FH_Density,     by = "participant_id") %>%
-  left_join(bpm_max_scores, by = "participant_id")
+  left_join(bpm_max_scores, by = "participant_id") %>%
+  left_join(asr_matched,    by = "participant_id")
 
 # -----------------------------
-# 2) Integrity checks (duplicates / rows)
+# 2) Integrity checks
 # -----------------------------
 stopifnot(!any(duplicated(MED_DHQ_Data_xlsx$participant_id)))
 stopifnot(!any(duplicated(Cov_baseline$participant_id)))
 stopifnot(!any(duplicated(FH_Density$participant_id)))
 stopifnot(!any(duplicated(bpm_max_scores$participant_id)))
+stopifnot(!any(duplicated(asr_matched$participant_id)))
 stopifnot(nrow(analytic_df) == nrow(MED_DHQ_Data_xlsx))
 
 # -----------------------------
@@ -78,11 +81,16 @@ outcomes <- c(
   "mh_y_bpm__int_sum_max",
   "mh_t_bpm__ext_sum_mean",
   "mh_t_bpm__ext_sum_max",
-  # CBCL (parent)
+  # CBCL
   "mh_p_cbcl__synd__int_sum_mean",
   "mh_p_cbcl__synd__int_sum_max",
   "mh_p_cbcl__synd__ext_sum_mean",
-  "mh_p_cbcl__synd__ext_sum_max"
+  "mh_p_cbcl__synd__ext_sum_max",
+  # YSR DSM
+  "ysr_dsm_dep_sum_mean",
+  "ysr_dsm_dep_sum_max",
+  "ysr_dsm_anx_sum_mean",
+  "ysr_dsm_anx_sum_max"
 )
 
 outcome_labels <- c(
@@ -93,13 +101,42 @@ outcome_labels <- c(
   mh_p_cbcl__synd__int_sum_mean  = "CBCL Int (Mean)",
   mh_p_cbcl__synd__int_sum_max   = "CBCL Int (Max)",
   mh_p_cbcl__synd__ext_sum_mean  = "CBCL Ext (Mean)",
-  mh_p_cbcl__synd__ext_sum_max   = "CBCL Ext (Max)"
+  mh_p_cbcl__synd__ext_sum_max   = "CBCL Ext (Max)",
+  ysr_dsm_dep_sum_mean           = "YSR DSM Dep (Mean)",
+  ysr_dsm_dep_sum_max            = "YSR DSM Dep (Max)",
+  ysr_dsm_anx_sum_mean           = "YSR DSM Anx (Mean)",
+  ysr_dsm_anx_sum_max            = "YSR DSM Anx (Max)"
 )
 
-# --- PS model base covariates (without ssri_before) ---
+# -----------------------------
+# 5) ASR covariate lookup by outcome
+#    max outcomes  -> temporally matched ASR (centered)
+#    mean outcomes -> mean ASR (centered)
+#    YSR dep/anx   -> domain-matched ASR only
+#    BPM/CBCL      -> both ASR dep and anx
+# -----------------------------
+asr_covar_lookup <- list(
+  mh_y_bpm__int_sum_mean         = c("asr_dep_mean_c", "asr_anx_mean_c"),
+  mh_y_bpm__int_sum_max          = c("asr_dep_matched_max_c", "asr_anx_matched_max_c"),
+  mh_t_bpm__ext_sum_mean         = c("asr_dep_mean_c", "asr_anx_mean_c"),
+  mh_t_bpm__ext_sum_max          = c("asr_dep_matched_max_c", "asr_anx_matched_max_c"),
+  mh_p_cbcl__synd__int_sum_mean  = c("asr_dep_mean_c", "asr_anx_mean_c"),
+  mh_p_cbcl__synd__int_sum_max   = c("asr_dep_matched_max_c", "asr_anx_matched_max_c"),
+  mh_p_cbcl__synd__ext_sum_mean  = c("asr_dep_mean_c", "asr_anx_mean_c"),
+  mh_p_cbcl__synd__ext_sum_max   = c("asr_dep_matched_max_c", "asr_anx_matched_max_c"),
+  ysr_dsm_dep_sum_mean           = c("asr_dep_mean_c"),
+  ysr_dsm_dep_sum_max            = c("asr_dep_matched_max_c"),
+  ysr_dsm_anx_sum_mean           = c("asr_anx_mean_c"),
+  ysr_dsm_anx_sum_max            = c("asr_anx_matched_max_c")
+)
+
+# -----------------------------
+# 6) PS model covariates
+#    (no ASR, no ssri_before — identical across all four configs)
+# -----------------------------
 ps_core_covars <- c(
   "mh_p_famhx__dep__moth_001",
-  "mom_age_preg",
+  "mom_age_preg_c",
   "mat_race",
   "ab_g_dyn__cohort_income__hhold__6lvl",
   "ab_g_dyn__cohort_edu__cgs"
@@ -122,22 +159,20 @@ ps_sub_covars <- c(
   "coc_before"
 )
 
-ps_covars_base <- c(ps_core_covars, ps_med_covars, ps_sub_covars)
+ps_covars_base_c <- c(ps_core_covars, ps_med_covars, ps_sub_covars)
 
-# --- Outcome model base covariates (without ssri_before) ---
+# -----------------------------
+# 7) Outcome model base covariates
+#    (no ASR, no ssri_before — added dynamically per config/outcome)
+# -----------------------------
 out_core_covars <- c(
   "mh_p_famhx__dep__moth_001",
-  "mom_age_preg",
+  "mom_age_preg_c",
   "mat_race",
   "ab_g_dyn__cohort_income__hhold__6lvl",
   "ab_g_dyn__cohort_edu__cgs",
   "planned_preg",
   "prenatal_vit"
-)
-
-out_asr_covars <- c(
-  "asr_dep_c",
-  "asr_anx_c"
 )
 
 out_med_covars <- c(
@@ -158,119 +193,95 @@ out_sub_covars <- c(
   "coc_after"
 )
 
-out_covars_base <- c(out_asr_covars, out_core_covars, out_med_covars, out_sub_covars)
+out_covars_base <- c(out_core_covars, out_med_covars, out_sub_covars)
 
-# --- All variables for Table 1 ---
+# --- Table 1 variables ---
 table1_vars <- c(
-  # Demographics
   "mat_race", "mom_age_preg",
   "ab_g_dyn__cohort_income__hhold__6lvl",
   "ab_g_dyn__cohort_edu__cgs",
-  # Psychiatric
   "mh_p_asr__dsm__dep_sum", "mh_p_asr__dsm__anx_sum",
   "mh_p_famhx__dep__moth_001",
-  # Pregnancy
   "planned_preg", "prenatal_vit",
-  # Pre-pregnancy medications
   "ssri_before",
   "nonssriad_before", "anticonvulsant_before",
   "stimulant_before", "sleepaid_before",
   "anxiolytic_before", "antipsychotic_before", "opioid_before",
-  # Pre-pregnancy substances
   "alc_before", "mj_before", "nic_before", "coc_before",
-  # Post-knowledge medications
   "nonssriad_after", "otheratd_after", "anticonvulsant_after",
   "stimulant_after", "sleepaid_after",
   "anxiolytic_after", "antipsychotic_after", "opioid_after",
-  # Post-knowledge substances
   "alc_after", "mj_after", "nic_after", "coc_after",
-  # Outcomes
   "mh_y_bpm__int_sum_mean", "mh_y_bpm__int_sum_max",
   "mh_t_bpm__ext_sum_mean", "mh_t_bpm__ext_sum_max",
   "mh_p_cbcl__synd__int_sum_mean", "mh_p_cbcl__synd__int_sum_max",
-  "mh_p_cbcl__synd__ext_sum_mean", "mh_p_cbcl__synd__ext_sum_max"
+  "mh_p_cbcl__synd__ext_sum_mean", "mh_p_cbcl__synd__ext_sum_max",
+  "ysr_dsm_dep_sum_mean", "ysr_dsm_dep_sum_max",
+  "ysr_dsm_anx_sum_mean", "ysr_dsm_anx_sum_max"
 )
 
 # -----------------------------
-# 5) Ensure required columns exist
-#    Note: asr_dep_c and asr_anx_c are derived in step 6;
-#    check their source columns here instead
+# 8) Check required columns exist
+#    (exclude derived _c columns — created in step 9)
 # -----------------------------
 needed_cols <- unique(c(
   "participant_id", exposure_var, "ssri_before",
   "ab_p_demo__relation_001", "snri_before", "snri_after",
-  outcomes, ps_covars_base,
-  # outcome covariates that are not derived (exclude asr_dep_c, asr_anx_c)
-  out_core_covars, out_med_covars, out_sub_covars,
-  # source columns for centered vars
-  "mh_p_asr__dsm__dep_sum", "mh_p_asr__dsm__anx_sum", "mom_age_preg"
-))
+  outcomes,
+  ps_med_covars, ps_sub_covars,
+  "mh_p_famhx__dep__moth_001", "mom_age_preg", "mat_race",
+  "ab_g_dyn__cohort_income__hhold__6lvl", "ab_g_dyn__cohort_edu__cgs",
+  out_med_covars, out_sub_covars,
+  "planned_preg", "prenatal_vit",
+  "mh_p_asr__dsm__dep_sum", "mh_p_asr__dsm__anx_sum",
+  "asr_dep_matched_max", "asr_anx_matched_max",
+  "asr_dep_mean", "asr_anx_mean"
+)) %>%
+  setdiff(c(
+    "mom_age_preg_c",
+    "asr_dep_matched_max_c", "asr_anx_matched_max_c",
+    "asr_dep_mean_c", "asr_anx_mean_c"
+  ))
+
 missing_cols <- setdiff(needed_cols, names(analytic_df))
 if (length(missing_cols) > 0) {
   stop("Missing columns in analytic_df: ", paste(missing_cols, collapse = ", "))
 }
 
 # -----------------------------
-# 6) Center continuous covariates
-#    (leave factors as factors; do NOT scale/center them)
+# 9) Center continuous covariates
 # -----------------------------
 analytic_df <- analytic_df %>%
   mutate(
-    asr_dep_c      = as.numeric(scale(.data[["mh_p_asr__dsm__dep_sum"]], scale = FALSE)),
-    asr_anx_c      = as.numeric(scale(.data[["mh_p_asr__dsm__anx_sum"]], scale = FALSE)),
-    mom_age_preg_c = as.numeric(scale(.data[["mom_age_preg"]], scale = FALSE))
+    mom_age_preg_c        = as.numeric(scale(mom_age_preg,        scale = FALSE)),
+    asr_dep_matched_max_c = as.numeric(scale(asr_dep_matched_max, scale = FALSE)),
+    asr_anx_matched_max_c = as.numeric(scale(asr_anx_matched_max, scale = FALSE)),
+    asr_dep_mean_c        = as.numeric(scale(asr_dep_mean,        scale = FALSE)),
+    asr_anx_mean_c        = as.numeric(scale(asr_anx_mean,        scale = FALSE))
   )
 
-# Centered versions of covar lists
-ps_core_covars_c <- c(
-  "asr_dep_c",
-  "asr_anx_c",
-  "mh_p_famhx__dep__moth_001",
-  "mom_age_preg_c",
-  "mat_race",
-  "ab_g_dyn__cohort_income__hhold__6lvl",
-  "ab_g_dyn__cohort_edu__cgs"
-)
-
-ps_covars_base_c <- c(ps_core_covars_c, ps_med_covars, ps_sub_covars)
-
-out_core_covars_c <- c(
-  "mh_p_famhx__dep__moth_001",
-  "mom_age_preg_c",
-  "mat_race",
-  "ab_g_dyn__cohort_income__hhold__6lvl",
-  "ab_g_dyn__cohort_edu__cgs",
-  "planned_preg",
-  "prenatal_vit"
-)
-
-out_covars_base_c <- c(out_asr_covars, out_core_covars_c, out_med_covars, out_sub_covars)
-
 # -----------------------------
-# 7) Define four model configurations
-#    ssri_before_in_ps | ssri_before_in_outcome
+# 10) Define four model configurations
 # -----------------------------
 model_configs <- list(
-  model1 = list(label = "ssri_before_in_PS_and_outcome",  ps_ssri = TRUE,  out_ssri = TRUE),
-  model2 = list(label = "ssri_before_in_PS_only",         ps_ssri = TRUE,  out_ssri = FALSE),
-  model3 = list(label = "ssri_before_in_outcome_only",    ps_ssri = FALSE, out_ssri = TRUE),
-  model4 = list(label = "ssri_before_in_neither",         ps_ssri = FALSE, out_ssri = FALSE)
+  model_A = list(label = "A_ssri_before_in_outcome_no_ASR",   out_ssri = TRUE,  out_asr = FALSE),
+  model_B = list(label = "B_ssri_before_in_outcome_with_ASR", out_ssri = TRUE,  out_asr = TRUE),
+  model_C = list(label = "C_ssri_before_in_neither_no_ASR",   out_ssri = FALSE, out_asr = FALSE),
+  model_D = list(label = "D_ssri_before_in_neither_with_ASR", out_ssri = FALSE, out_asr = TRUE)
 )
 
 # -----------------------------
-# 8) Helper functions
+# 11) Helper functions
 # -----------------------------
-
 get_usable_covars <- function(data, covars, label) {
   miss_tbl <- data.frame(
-    var = covars,
+    var          = covars,
     n_missing    = sapply(covars, function(v) sum(is.na(data[[v]]))),
     n_nonmissing = sapply(covars, function(v) sum(!is.na(data[[v]])))
   )
   miss_tbl <- miss_tbl[order(miss_tbl$n_nonmissing), ]
   cat("\nMissingness table for", label, ":\n")
   print(miss_tbl)
-
   drop_vars <- subset(miss_tbl, n_nonmissing == 0)$var
   if (length(drop_vars) > 0) {
     cat("Dropping all-NA covariates:", paste(drop_vars, collapse = ", "), "\n")
@@ -299,12 +310,11 @@ tidy_coeftest <- function(ct) {
 }
 
 # -----------------------------
-# 9) Run all four model configurations
-#    Retain w_out and ps_cc for plotting
+# 12) Run all four model configurations
 # -----------------------------
-all_results  <- list()
-w_out_list   <- list()
-ps_cc_list   <- list()
+all_results <- list()
+w_out_list  <- list()
+ps_cc_list  <- list()
 
 for (cfg_name in names(model_configs)) {
 
@@ -313,15 +323,11 @@ for (cfg_name in names(model_configs)) {
   cat("Running:", cfg$label, "\n")
   cat("============================================================\n")
 
-  # Build PS and outcome covar lists for this config
-  ps_covars_cfg  <- if (cfg$ps_ssri)  c(ps_covars_base_c,  "ssri_before") else ps_covars_base_c
-  out_covars_cfg <- if (cfg$out_ssri) c(out_covars_base_c, "ssri_before") else out_covars_base_c
-
   # --- PS complete-case set ---
   tmp_expo <- analytic_df %>% filter(!is.na(.data[[exposure_var]]))
   stopifnot(nrow(tmp_expo) > 0)
 
-  usable_ps <- get_usable_covars(tmp_expo, ps_covars_cfg, cfg$label)
+  usable_ps <- get_usable_covars(tmp_expo, ps_covars_base_c, cfg$label)
 
   ps_cc <- tmp_expo %>%
     filter(if_all(all_of(usable_ps), ~ !is.na(.x)))
@@ -345,7 +351,6 @@ for (cfg_name in names(model_configs)) {
   w_out <- trim(w_out, at = 0.99)
   ps_cc$w_att <- w_out$weights
 
-  # --- Retain for plotting ---
   w_out_list[[cfg_name]] <- w_out
   ps_cc_list[[cfg_name]] <- ps_cc
 
@@ -373,11 +378,21 @@ for (cfg_name in names(model_configs)) {
   print(bal)
 
   # --- Outcome models ---
-  usable_out <- get_usable_covars(ps_cc, out_covars_cfg, paste(cfg$label, "outcome"))
-
   fit_one_outcome <- function(y) {
     dat_y <- ps_cc %>% filter(!is.na(.data[[y]]))
-    stopifnot(nrow(dat_y) > 0)
+
+    if (nrow(dat_y) == 0) {
+      message("Skipping ", y, " — no non-missing observations.")
+      return(NULL)
+    }
+
+    out_covars_cfg <- out_covars_base
+    if (cfg$out_ssri) out_covars_cfg <- c(out_covars_cfg, "ssri_before")
+    if (cfg$out_asr)  out_covars_cfg <- c(out_covars_cfg, asr_covar_lookup[[y]])
+
+    usable_out <- get_usable_covars(ps_cc, out_covars_cfg,
+                                    paste(cfg$label, y))
+
     formula_y <- as.formula(paste0(
       y, " ~ ", exposure_var, " + ",
       paste(usable_out, collapse = " + ")
@@ -389,6 +404,7 @@ for (cfg_name in names(model_configs)) {
 
   # --- Tidy results ---
   results_long <- bind_rows(lapply(names(model_fits), function(y) {
+    if (is.null(model_fits[[y]])) return(NULL)
     tidy_coeftest(model_fits[[y]]$coeftest) %>%
       mutate(outcome = y, model = cfg$label) %>%
       select(model, outcome, term, estimate, std_error, statistic, p_value)
@@ -398,7 +414,7 @@ for (cfg_name in names(model_configs)) {
 }
 
 # -----------------------------
-# 10) Combine and save results
+# 13) Combine and save results
 # -----------------------------
 results_all <- bind_rows(all_results)
 
@@ -410,8 +426,8 @@ print(results_key)
 
 output_path <- "C:/Users/jowjo/OneDrive/Desktop/ALL NYSPI/Work for Milenna/03152026 Repository/Results"
 
-write.csv(results_key, file = file.path(output_path, "results_key_Woodruff_vanDijk_ATT_revised.csv"), row.names = FALSE)
-write.csv(results_all, file = file.path(output_path, "results_full_Woodruff_vanDijk_ATT_revised.csv"), row.names = FALSE)
+write.csv(results_key, file = file.path(output_path, "results_key_WvD_ATT_ABCD.csv"),  row.names = FALSE)
+write.csv(results_all, file = file.path(output_path, "results_full_WvD_ATT_ABCD.csv"), row.names = FALSE)
 
 ############################################################
 # End
