@@ -1,0 +1,211 @@
+################################################################################
+# Woodruff & van Dijk Framework: Temporally Matched ASR Covariates
+#
+# Purpose
+# -------
+# For each participant, derive ASR depression and anxiety covariates that are
+# temporally matched to the session of peak YSR symptom burden. These are
+# intended for use as covariates in weighted outcome models for MAX score
+# outcomes only. Mean ASR covariates (for use with MEAN score outcomes) are
+# also derived here as simple participant-level means across all sessions.
+#
+# Matching Logic
+# --------------
+# For each scale (depression, anxiety) independently:
+#   1. Identify the session of peak YSR score (earliest session wins ties)
+#   2. Find the session with available ASR data closest in time to that session
+#      using the hardcoded ABCD session order as the temporal scaffold
+#   3. Pull the ASR value from that matched session
+#
+# Output: asr_matched
+# -------------------
+# One row per participant containing:
+#   asr_dep_matched_max      : ASR dep score from session closest to max YSR dep
+#   asr_anx_matched_max      : ASR anx score from session closest to max YSR anx
+#   asr_dep_matched_session  : Session ID used for asr_dep_matched_max (audit)
+#   asr_anx_matched_session  : Session ID used for asr_anx_matched_max (audit)
+#   asr_dep_mean             : Mean ASR dep across all available sessions
+#   asr_anx_mean             : Mean ASR anx across all available sessions
+#
+# Participants with no ASR data are retained with NA values.
+#
+# Source data
+#   YSR (long format): BPM data.frame
+#     - mh_y_ysr__dsm__dep_sum
+#     - mh_y_ysr__dsm__anx_sum
+#   ASR (long format): Cov data.frame
+#     - mh_p_asr__dsm__dep_sum
+#     - mh_p_asr__dsm__anx_sum
+################################################################################
+
+library(dplyr)
+
+# -----------------------------
+# 1) Hardcoded session order
+# -----------------------------
+session_order <- c(
+  "ses-00S",   # Screener
+  "ses-00A",   # Baseline
+  "ses-00M",   # 0.5 Year
+  "ses-01A",   # 1 Year
+  "ses-01M",   # 1.5 Year
+  "ses-02A",   # 2 Year
+  "ses-02M",   # 2.5 Year
+  "ses-03A",   # 3 Year
+  "ses-03M",   # 3.5 Year
+  "ses-04A",   # 4 Year
+  "ses-04M",   # 4.5 Year
+  "ses-05A",   # 5 Year
+  "ses-05M",   # 5.5 Year
+  "ses-06A",   # 6 Year
+  "ses-C01",   # COVID Wave 1
+  "ses-C02",   # COVID Wave 2
+  "ses-C03",   # COVID Wave 3
+  "ses-C04",   # COVID Wave 4
+  "ses-C05",   # COVID Wave 5
+  "ses-C06",   # COVID Wave 6
+  "ses-C07",   # COVID Wave 7
+  "ses-S01",   # SDev Wave 1
+  "ses-S02",   # SDev Wave 2
+  "ses-S03",   # SDev Wave 3
+  "ses-S04",   # SDev Wave 4
+  "ses-S05"    # SDev Wave 5
+)
+
+# Numeric index for distance calculations
+session_rank <- setNames(seq_along(session_order), session_order)
+
+# -----------------------------
+# 2) Prepare long-format YSR
+#    (from BPM; keep only non-NA rows per scale)
+# -----------------------------
+ysr_long <- BPM %>%
+  filter(!is.na(session_id)) %>%
+  select(participant_id, session_id,
+         mh_y_ysr__dsm__dep_sum,
+         mh_y_ysr__dsm__anx_sum) %>%
+  mutate(session_rank = session_rank[session_id])
+
+# -----------------------------
+# 3) Prepare long-format ASR
+#    (from Cov; keep only non-NA rows per scale)
+# -----------------------------
+asr_long <- Cov %>%
+  filter(!is.na(session_id)) %>%
+  select(participant_id, session_id,
+         mh_p_asr__dsm__dep_sum,
+         mh_p_asr__dsm__anx_sum) %>%
+  mutate(session_rank = session_rank[session_id])
+
+# -----------------------------
+# 4) Helper: find session of peak YSR score
+#    Ties broken by earliest session (lowest rank)
+# -----------------------------
+get_max_session <- function(df, score_var) {
+  df %>%
+    filter(!is.na(.data[[score_var]])) %>%
+    group_by(participant_id) %>%
+    slice_min(order_by = session_rank,
+              n = 1,
+              with_ties = FALSE) %>%
+    filter(.data[[score_var]] == max(.data[[score_var]])) %>%
+    slice_min(order_by = session_rank, n = 1, with_ties = FALSE) %>%
+    ungroup() %>%
+    select(participant_id, max_session_rank = session_rank)
+}
+
+# Correct approach: rank the max value first, then take earliest among ties
+get_max_session <- function(df, score_var) {
+  df %>%
+    filter(!is.na(.data[[score_var]])) %>%
+    group_by(participant_id) %>%
+    mutate(peak = max(.data[[score_var]], na.rm = TRUE)) %>%
+    filter(.data[[score_var]] == peak) %>%
+    slice_min(order_by = session_rank, n = 1, with_ties = FALSE) %>%
+    ungroup() %>%
+    select(participant_id, max_session_rank = session_rank)
+}
+
+dep_max_session <- get_max_session(ysr_long, "mh_y_ysr__dsm__dep_sum")
+anx_max_session <- get_max_session(ysr_long, "mh_y_ysr__dsm__anx_sum")
+
+# -----------------------------
+# 5) Helper: find closest ASR session to a target session rank
+# -----------------------------
+find_closest_asr <- function(asr_df, score_var, target_ranks_df) {
+  asr_df %>%
+    filter(!is.na(.data[[score_var]])) %>%
+    inner_join(target_ranks_df, by = "participant_id") %>%
+    mutate(dist = abs(session_rank - max_session_rank)) %>%
+    group_by(participant_id) %>%
+    slice_min(order_by = dist, n = 1, with_ties = FALSE) %>%
+    ungroup() %>%
+    select(participant_id,
+           matched_session = session_id,
+           matched_value   = all_of(score_var))
+}
+
+asr_dep_matched <- find_closest_asr(
+  asr_long, "mh_p_asr__dsm__dep_sum", dep_max_session
+)
+asr_anx_matched <- find_closest_asr(
+  asr_long, "mh_p_asr__dsm__anx_sum", anx_max_session
+)
+
+# -----------------------------
+# 6) Compute mean ASR per participant across all sessions
+# -----------------------------
+asr_means <- asr_long %>%
+  group_by(participant_id) %>%
+  summarise(
+    asr_dep_mean = if (all(is.na(mh_p_asr__dsm__dep_sum))) NA_real_
+                   else mean(mh_p_asr__dsm__dep_sum, na.rm = TRUE),
+    asr_anx_mean = if (all(is.na(mh_p_asr__dsm__anx_sum))) NA_real_
+                   else mean(mh_p_asr__dsm__anx_sum, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# -----------------------------
+# 7) Build all participant IDs from BPM
+#    (ensures participants with no ASR are retained with NA)
+# -----------------------------
+all_ids <- BPM %>%
+  distinct(participant_id)
+
+# -----------------------------
+# 8) Assemble asr_matched
+# -----------------------------
+asr_matched <- all_ids %>%
+  left_join(
+    asr_dep_matched %>%
+      rename(asr_dep_matched_max     = matched_value,
+             asr_dep_matched_session = matched_session),
+    by = "participant_id"
+  ) %>%
+  left_join(
+    asr_anx_matched %>%
+      rename(asr_anx_matched_max     = matched_value,
+             asr_anx_matched_session = matched_session),
+    by = "participant_id"
+  ) %>%
+  left_join(asr_means, by = "participant_id")
+
+# -----------------------------
+# 9) Verify
+# -----------------------------
+cat("asr_matched rows:    ", nrow(asr_matched), "\n")
+cat("Distinct participants:", n_distinct(asr_matched$participant_id), "\n")
+
+cat("\nMissingness summary:\n")
+sapply(asr_matched[-1], function(x) sum(is.na(x)))
+
+cat("\nasr_dep_matched_max:\n");  summary(asr_matched$asr_dep_matched_max)
+cat("\nasr_anx_matched_max:\n");  summary(asr_matched$asr_anx_matched_max)
+cat("\nasr_dep_mean:\n");         summary(asr_matched$asr_dep_mean)
+cat("\nasr_anx_mean:\n");         summary(asr_matched$asr_anx_mean)
+
+cat("\nMatched session distribution (dep):\n")
+print(table(asr_matched$asr_dep_matched_session, useNA = "ifany"))
+
+cat("\nMatched session distribution (anx):\n")
+print(table(asr_matched$asr_anx_matched_session, useNA = "ifany"))
