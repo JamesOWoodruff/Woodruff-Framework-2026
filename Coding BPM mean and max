@@ -1,7 +1,7 @@
 ################################################################################
 # Woodruff & van Dijk Framework: Behavioral Outcome Aggregation
 # (BPM + CBCL Participant-Level Outcomes)
-#
+# 
 # Purpose
 # -------
 # This script collapses repeated behavioral assessments into participant-level
@@ -73,12 +73,17 @@
 # framework.
 #
 ################################################################################
+################################################################################
+# Woodruff & van Dijk Framework: Behavioral Outcome Aggregation
+# (BPM + CBCL + YSR DSM Participant-Level Outcomes)
+################################################################################
 
 library(dplyr)
 
 bpm_max_scores <- BPM %>%
   group_by(participant_id) %>%
   summarise(
+
     # ---- TEACHER EXTERNALIZING (BPM) ----
     mh_t_bpm__ext_sum_max =
       if (all(is.na(mh_t_bpm__ext_sum))) NA_real_
@@ -98,8 +103,6 @@ bpm_max_scores <- BPM %>%
       else mean(mh_y_bpm__int_sum, na.rm = TRUE),
 
     # ---- PARENT INTERNALIZING (CBCL) ----
-    # Using CBCL syndrome internalizing sum score:
-    #   mh_p_cbcl__synd__int_sum
     mh_p_cbcl__synd__int_sum_max =
       if (all(is.na(mh_p_cbcl__synd__int_sum))) NA_real_
       else max(mh_p_cbcl__synd__int_sum, na.rm = TRUE),
@@ -109,8 +112,6 @@ bpm_max_scores <- BPM %>%
       else mean(mh_p_cbcl__synd__int_sum, na.rm = TRUE),
 
     # ---- PARENT EXTERNALIZING (CBCL) ----
-    # Using CBCL syndrome externalizing sum score:
-    #   mh_p_cbcl__synd__ext_sum
     mh_p_cbcl__synd__ext_sum_max =
       if (all(is.na(mh_p_cbcl__synd__ext_sum))) NA_real_
       else max(mh_p_cbcl__synd__ext_sum, na.rm = TRUE),
@@ -118,6 +119,24 @@ bpm_max_scores <- BPM %>%
     mh_p_cbcl__synd__ext_sum_mean =
       if (all(is.na(mh_p_cbcl__synd__ext_sum))) NA_real_
       else mean(mh_p_cbcl__synd__ext_sum, na.rm = TRUE),
+
+    # ---- YOUTH DSM DEPRESSION (YSR) ----
+    ysr_dsm_dep_sum_max =
+      if (all(is.na(mh_y_ysr__dsm__dep_sum))) NA_real_
+      else max(mh_y_ysr__dsm__dep_sum, na.rm = TRUE),
+
+    ysr_dsm_dep_sum_mean =
+      if (all(is.na(mh_y_ysr__dsm__dep_sum))) NA_real_
+      else mean(mh_y_ysr__dsm__dep_sum, na.rm = TRUE),
+
+    # ---- YOUTH DSM ANXIETY (YSR) ----
+    ysr_dsm_anx_sum_max =
+      if (all(is.na(mh_y_ysr__dsm__anx_sum))) NA_real_
+      else max(mh_y_ysr__dsm__anx_sum, na.rm = TRUE),
+
+    ysr_dsm_anx_sum_mean =
+      if (all(is.na(mh_y_ysr__dsm__anx_sum))) NA_real_
+      else mean(mh_y_ysr__dsm__anx_sum, na.rm = TRUE),
 
     .groups = "drop"
   )
