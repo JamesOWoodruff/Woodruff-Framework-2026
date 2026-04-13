@@ -354,12 +354,12 @@ MED_DHQ_Data_xlsx <- MED_DHQ_Data_xlsx %>%
       if_any(all_of(rx_all_vars), ~ contains_terms(.x, opioid_terms))
     )
   ) %>%
-  mutate(
+mutate(
     across(
-      starts_with("prenatal_"),
-      ~ if_else(is.na(.x), 0L, .x)
+        starts_with("prenatal_") & !ends_with("_drug"),
+        ~ if_else(is.na(.x), 0L, .x)
     )
-  )
+)
 
 ############################################################
 # 4. BEFORE / AFTER KNOWLEDGE OF PREGNANCY – CLASS FLAGS
