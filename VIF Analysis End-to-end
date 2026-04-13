@@ -5,8 +5,8 @@
 # REVISED:
 #  - Model structure reduced from 4 to 3 configs:
 #      A: ssri_before not in outcome, ASR not in outcome
-#      B: ssri_before in outcome,     ASR in outcome
-#      C: ssri_before not in outcome, ASR in outcome
+#      B: ssri_before in outcome,     ASR in outcomes
+#      C: ssri_before not in outcome, ASR in outcomes
 #  - VIF diagnostics added per outcome model
 #    (aliased coefficients handled via alias() before vif())
 #  - asr_matched joined into analytic_df (4th join)
