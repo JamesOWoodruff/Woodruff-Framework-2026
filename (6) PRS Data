@@ -1,0 +1,103 @@
+################################################################################
+# Woodruff & van Dijk Framework: PRS Covariate Preparation
+#
+# Purpose
+# -------
+# Loads the MDD 2025 polygenic risk score file and the ancestry principal
+# components file, standardizes the PRS, and outputs a clean participant-level
+# dataset for use as a covariate in the WvD causal inference framework.
+#
+# Input
+# -----
+# MDD2025_ABCD.all_score  — PRSice output file (space-delimited)
+#   Contains: FID, IID, Pt_* columns (one per p-value threshold)
+#   We use Pt_0.5 (standard best-fit threshold in psychiatric PRS literature)
+#
+# Cov — must already exist in environment (from LASSO query)
+#   Must contain: participant_id, session_id, ab_g_stc__gen_pc__01 through __10
+#
+# Output
+# ------
+# prs_data
+#   One row per participant containing:
+#     participant_id : WvD-format ID (sub- prefix)
+#     mdd_prs        : Raw PRS score at Pt_0.5
+#     mdd_prs_z      : Standardized (z-scored) PRS
+#     ab_g_stc__gen_pc__01 through ab_g_stc__gen_pc__10 : Ancestry PCs
+#
+# Notes
+# -----
+# PRS is available only for genotyped participants who passed QC (~82% of
+# analytic sample). Models including PRS will have a reduced N. This should
+# be reported as a limitation. Ancestry PCs are pulled from Cov at baseline
+# (ses-00A) to ensure one row per participant.
+#
+# The threshold Pt_0.5 should be confirmed with Milenna before finalizing.
+################################################################################
+
+library(dplyr)
+library(stringr)
+library(data.table)
+
+# -----------------------------
+# 1) Load PRS file (targeted read — IID + Pt_0.5 only)
+# -----------------------------
+prs_raw <- fread(
+  "C:/Users/jowjo/OneDrive/Desktop/ALL NYSPI/Work for Milenna/04112026 ACE Run/PRS/MDD2025_ABCD.all_score",
+  select = c("IID", "Pt_0.5")
+)
+
+# -----------------------------
+# 2) Rename, harmonize IDs, standardize PRS
+# -----------------------------
+prs_raw <- prs_raw %>%
+  rename(participant_id = IID, mdd_prs = Pt_0.5) %>%
+  mutate(
+    participant_id = str_replace(participant_id, "^NDAR_INV", "sub-"),
+    mdd_prs_z      = as.numeric(scale(mdd_prs, center = TRUE, scale = TRUE))
+  )
+
+# -----------------------------
+# 3) Pull ancestry PCs from Cov at baseline
+#    (one row per participant)
+# -----------------------------
+pc_cols <- c(
+  "participant_id",
+  "ab_g_stc__gen_pc__01", "ab_g_stc__gen_pc__02", "ab_g_stc__gen_pc__03",
+  "ab_g_stc__gen_pc__04", "ab_g_stc__gen_pc__05", "ab_g_stc__gen_pc__06",
+  "ab_g_stc__gen_pc__07", "ab_g_stc__gen_pc__08", "ab_g_stc__gen_pc__09",
+  "ab_g_stc__gen_pc__10"
+)
+
+pcs_baseline <- Cov %>%
+  filter(session_id == "ses-00A") %>%
+  select(all_of(pc_cols))
+
+# -----------------------------
+# 4) Merge PRS + PCs
+# -----------------------------
+prs_data <- prs_raw %>%
+  left_join(pcs_baseline, by = "participant_id")
+
+# -----------------------------
+# 5) Verify
+# -----------------------------
+cat("prs_data rows:              ", nrow(prs_data), "\n")
+cat("Distinct participants:      ", n_distinct(prs_data$participant_id), "\n")
+cat("Duplicates:                 ", sum(duplicated(prs_data$participant_id)), "\n")
+
+cat("\nPRS (raw) summary:\n")
+print(summary(prs_data$mdd_prs))
+
+cat("\nPRS (z-scored) summary:\n")
+print(summary(prs_data$mdd_prs_z))
+
+cat("\nPC missingness:\n")
+print(sapply(prs_data[, pc_cols[-1]], function(x) sum(is.na(x))))
+
+cat("\nParticipants with PRS but missing all PCs:\n")
+cat(sum(is.na(prs_data$ab_g_stc__gen_pc__01)), "\n")
+
+################################################################################
+# Output: prs_data
+################################################################################
