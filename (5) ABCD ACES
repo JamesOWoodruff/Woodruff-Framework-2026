@@ -1,0 +1,56 @@
+################################################################################
+# Woodruff & van Dijk Framework: ACEs Covariate Preparation
+#
+# Purpose
+# -------
+# Loads Milenna's pre-computed ACEs dataset and extracts a clean
+# participant-level baseline ACEs score for use as a sensitivity covariate
+# and moderator in the WvD causal inference framework.
+#
+# Input
+# -----
+# DijkLabAcesCompilation.Rda — must exist at the path specified below.
+# Contains: abcd_aces_fin (participant_id, session_id, AcesTotBaselineand1yrfu)
+#
+# Output
+# ------
+# abcd_aces_base
+#   One row per participant containing:
+#     participant_id         : WvD-format ID (sub- prefix)
+#     AcesTotBaselineand1yrfu: Cumulative ACEs score (0-21, baseline + 1yr FU)
+#
+# Notes
+# -----
+# AcesTotBaselineand1yrfu is broadcast across sessions in the source file.
+# We filter to ses-00A to ensure one row per participant before merging.
+# Centering (aces_tot_c) is performed downstream in WvD_EndToEnd.R.
+################################################################################
+
+library(dplyr)
+
+# -----------------------------
+# 1) Load
+# -----------------------------
+load("C:/Users/jowjo/OneDrive/Desktop/ALL NYSPI/Work for Milenna/04112026 ACE Run/DijkLabAcesCompilation.Rda")
+
+# -----------------------------
+# 2) Filter to baseline, select columns
+# -----------------------------
+abcd_aces_base <- abcd_aces_fin %>%
+  filter(session_id == "ses-00A") %>%
+  select(participant_id, AcesTotBaselineand1yrfu)
+
+# -----------------------------
+# 3) Verify
+# -----------------------------
+cat("abcd_aces_base rows:        ", nrow(abcd_aces_base), "\n")
+cat("Distinct participants:      ", n_distinct(abcd_aces_base$participant_id), "\n")
+cat("Duplicates:                 ", sum(duplicated(abcd_aces_base$participant_id)), "\n")
+cat("\nACEs score distribution:\n")
+print(table(abcd_aces_base$AcesTotBaselineand1yrfu, useNA = "ifany"))
+cat("\nSummary:\n")
+print(summary(abcd_aces_base$AcesTotBaselineand1yrfu))
+
+################################################################################
+# Output: abcd_aces_base
+################################################################################
