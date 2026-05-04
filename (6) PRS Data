@@ -44,14 +44,14 @@ library(data.table)
 # -----------------------------
 prs_raw <- fread(
   "C:/Users/jowjo/OneDrive/Desktop/ALL NYSPI/Work for Milenna/04112026 ACE Run/PRS/MDD2025_ABCD.all_score",
-  select = c("IID", "Pt_0.5")
+  select = c("IID", "Pt_0.00010005")
 )
 
 # -----------------------------
 # 2) Rename, harmonize IDs, standardize PRS
 # -----------------------------
 prs_raw <- prs_raw %>%
-  rename(participant_id = IID, mdd_prs = Pt_0.5) %>%
+  rename(participant_id = IID, mdd_prs = Pt_0.00010005) %>%
   mutate(
     participant_id = str_replace(participant_id, "^NDAR_INV", "sub-"),
     mdd_prs_z      = as.numeric(scale(mdd_prs, center = TRUE, scale = TRUE))
