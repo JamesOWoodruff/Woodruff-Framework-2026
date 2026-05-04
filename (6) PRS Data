@@ -21,7 +21,7 @@
 # prs_data
 #   One row per participant containing:
 #     participant_id : WvD-format ID (sub- prefix)
-#     mdd_prs        : Raw PRS score at Pt_0.5
+#     mdd_prs        : Raw PRS score at Pt_0.00010005 
 #     mdd_prs_z      : Standardized (z-scored) PRS
 #     ab_g_stc__gen_pc__01 through ab_g_stc__gen_pc__10 : Ancestry PCs
 #
@@ -32,7 +32,7 @@
 # be reported as a limitation. Ancestry PCs are pulled from Cov at baseline
 # (ses-00A) to ensure one row per participant.
 #
-# The threshold Pt_0.5 should be confirmed with Milenna before finalizing.
+# The threshold Pt_0.00010005 
 ################################################################################
 
 library(dplyr)
