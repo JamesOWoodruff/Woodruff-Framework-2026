@@ -99,11 +99,17 @@ asr_long <- Cov %>%
 exposure_base <- MED_DHQ_Data_xlsx %>%
   select(participant_id, ssri_after, ssri_before,
          snri_before, snri_after,
-         nonssriad_after, otheratd_after,
-         anticonvulsant_after, stimulant_after,
-         sleepaid_after, anxiolytic_after,
-         antipsychotic_after, opioid_after,
-         alc_after, mj_after, nic_after, coc_after)
+         nonssriad_before, nonssriad_after, otheratd_after,
+         anticonvulsant_before, anticonvulsant_after,
+         stimulant_before, stimulant_after,
+         sleepaid_before, sleepaid_after,
+         anxiolytic_before, anxiolytic_after,
+         antipsychotic_before, antipsychotic_after,
+         opioid_before, opioid_after,
+         alc_before, alc_after,
+         mj_before, mj_after,
+         nic_before, nic_after,
+         coc_before, coc_after)
 
 baseline_covs <- Cov_baseline %>%
   select(participant_id,
@@ -115,16 +121,20 @@ baseline_covs <- Cov_baseline %>%
          planned_preg,
          prenatal_vit)
 
+reporter_var <- Cov %>%
+  select(participant_id, session_id, ab_p_demo__relation_001)
+
 # Long-format BPM restricted to annual sessions
 bpm_long <- BPM %>%
   filter(session_id %in% annual_sessions,
          !is.na(ab_g_dyn__visit_age)) %>%
   select(participant_id, session_id, ab_g_dyn__visit_age,
-         ab_p_demo__relation_001,
          mh_y_bpm__int_sum,
          mh_t_bpm__ext_sum,
          mh_p_cbcl__synd__int_sum,
-         mh_p_cbcl__synd__ext_sum)
+         mh_p_cbcl__synd__ext_sum) %>%
+  left_join(reporter_var, by = c("participant_id", "session_id"))
+
 
 # Join everything
 traj_df <- bpm_long %>%
