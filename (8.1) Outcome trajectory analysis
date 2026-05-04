@@ -1,0 +1,445 @@
+################################################################################
+# Woodruff & van Dijk Framework: Outcome Trajectory Analysis
+#
+# Purpose
+# -------
+# Models symptom trajectories across ABCD annual sessions (ses-00A to ses-06A)
+# as a function of prenatal SSRI exposure (ssri_after) using ATT-weighted
+# linear mixed effects models. Follows Milenna van Dijk's approach:
+#   - Continuous age (ab_g_dyn__visit_age, in years) as time axis
+#   - Quadratic age x exposure interaction (linear vs. quadratic compared via
+#     anova())
+#   - ATT PS weights from WeightIt applied to lmer via weights= argument
+#   - Predicted trajectories plotted over continuous age grid, covariates
+#     held at median/mode, one line per exposure group
+#
+# Four outcomes modeled:
+#   1. Youth BPM Internalizing    (mh_y_bpm__int_sum)   — primary
+#   2. Teacher BPM Externalizing  (mh_t_bpm__ext_sum)
+#   3. CBCL Internalizing         (mh_p_cbcl__synd__int_sum)
+#   4. CBCL Externalizing         (mh_p_cbcl__synd__ext_sum)
+#
+# Model specification mirrors Model B (primary):
+#   Fixed: age_c * ssri_after + age_c^2 * ssri_after +
+#          ssri_before + asr_dep_c + asr_anx_c +
+#          out_covars_base (demographic + medication + substance)
+#   Random: (1 | site/fam_id) + (1 | participant_id)
+#
+# Assumptions
+# -----------
+# Requires in memory:
+#   BPM               — long-format behavioral data WITH ab_g_dyn__visit_age
+#   MED_DHQ_Data_xlsx — exposure coding (Script 4)
+#   Cov               — for ASR (long format, all sessions) and fam_id/site
+#   Cov_baseline      — for baseline covariates (Script 3)
+#   FH_Density        — family history density
+#
+# Output
+# ------
+# trajectory_results  — list of model objects and anova comparisons per outcome
+# Four ggplot trajectory plots (one per outcome), printed and saved to output path
+# WvD_Trajectory_Results.csv — fixed effects from winning model per outcome
+################################################################################
+
+library(dplyr)
+library(lme4)
+library(lmerTest)
+library(ggplot2)
+library(WeightIt)
+library(broom.mixed)
+
+# -----------------------------
+# 1) Define outcomes
+# -----------------------------
+outcomes <- list(
+  list(
+    var   = "mh_y_bpm__int_sum",
+    label = "Youth BPM Internalizing",
+    color = c("0" = "black", "1" = "firebrick")
+  ),
+  list(
+    var   = "mh_t_bpm__ext_sum",
+    label = "Teacher BPM Externalizing",
+    color = c("0" = "black", "1" = "firebrick")
+  ),
+  list(
+    var   = "mh_p_cbcl__synd__int_sum",
+    label = "CBCL Internalizing",
+    color = c("0" = "black", "1" = "firebrick")
+  ),
+  list(
+    var   = "mh_p_cbcl__synd__ext_sum",
+    label = "CBCL Externalizing",
+    color = c("0" = "black", "1" = "firebrick")
+  )
+)
+
+# -----------------------------
+# 2) Build long-format analytic dataset
+#    Restrict to annual sessions only (age available)
+#    Apply same sample restrictions as primary analysis
+# -----------------------------
+annual_sessions <- c("ses-00A", "ses-01A", "ses-02A", "ses-03A",
+                     "ses-04A", "ses-05A", "ses-06A")
+
+# Pull site and fam_id from Cov (needed for random effects)
+site_fam <- Cov %>%
+  filter(session_id == "ses-00A") %>%
+  select(participant_id, site, fam_id = ab_g_stc__design_id__fam)
+
+# ASR: use session-level values (time-varying covariate)
+# For trajectory model we use the ASR at each session, not matched/mean
+asr_long <- Cov %>%
+  filter(session_id %in% annual_sessions) %>%
+  select(participant_id, session_id,
+         asr_dep_long = mh_p_asr__dsm__dep_sum,
+         asr_anx_long = mh_p_asr__dsm__anx_sum)
+
+# Exposure + baseline covariates (one row per participant)
+exposure_base <- MED_DHQ_Data_xlsx %>%
+  select(participant_id, ssri_after, ssri_before,
+         snri_before, snri_after,
+         nonssriad_after, otheratd_after,
+         anticonvulsant_after, stimulant_after,
+         sleepaid_after, anxiolytic_after,
+         antipsychotic_after, opioid_after,
+         alc_after, mj_after, nic_after, coc_after)
+
+baseline_covs <- Cov_baseline %>%
+  select(participant_id,
+         mh_p_famhx__dep__moth_001,
+         mom_age_preg,
+         mat_race,
+         ab_g_dyn__cohort_income__hhold__6lvl,
+         ab_g_dyn__cohort_edu__cgs,
+         planned_preg,
+         prenatal_vit)
+
+# Long-format BPM restricted to annual sessions
+bpm_long <- BPM %>%
+  filter(session_id %in% annual_sessions,
+         !is.na(ab_g_dyn__visit_age)) %>%
+  select(participant_id, session_id, ab_g_dyn__visit_age,
+         ab_p_demo__relation_001,
+         mh_y_bpm__int_sum,
+         mh_t_bpm__ext_sum,
+         mh_p_cbcl__synd__int_sum,
+         mh_p_cbcl__synd__ext_sum)
+
+# Join everything
+traj_df <- bpm_long %>%
+  left_join(exposure_base,  by = "participant_id") %>%
+  left_join(baseline_covs,  by = "participant_id") %>%
+  left_join(asr_long,       by = c("participant_id", "session_id")) %>%
+  left_join(site_fam,       by = "participant_id") %>%
+  left_join(FH_Density,     by = "participant_id")
+
+# Sample restrictions: biological mothers, no SNRIs
+traj_df <- traj_df %>%
+  filter(ab_p_demo__relation_001 == 1) %>%
+  filter(!(snri_before == 1 | snri_after == 1))
+
+cat("Trajectory dataset rows:        ", nrow(traj_df), "\n")
+cat("Distinct participants:           ", n_distinct(traj_df$participant_id), "\n")
+cat("Exposed (ssri_after == 1):       ",
+    n_distinct(traj_df$participant_id[traj_df$ssri_after == 1]), "\n")
+
+# -----------------------------
+# 3) PS model for ATT weights
+#    Same PS specification as primary analysis
+#    Fit on participant-level (baseline) data, then merge weights back
+# -----------------------------
+ps_covars <- c(
+  "mh_p_famhx__dep__moth_001",
+  "mom_age_preg_c",
+  "mat_race",
+  "ab_g_dyn__cohort_income__hhold__6lvl",
+  "ab_g_dyn__cohort_edu__cgs",
+  "asr_dep_mean_c",
+  "asr_anx_mean_c",
+  "nonssriad_before",
+  "anticonvulsant_before",
+  "stimulant_before",
+  "sleepaid_before",
+  "anxiolytic_before",
+  "antipsychotic_before",
+  "opioid_before",
+  "alc_before",
+  "mj_before",
+  "nic_before",
+  "coc_before"
+)
+
+# Pull baseline ASR means for PS model (from asr_matched, already computed)
+asr_means_ps <- asr_matched %>%
+  select(participant_id, asr_dep_mean, asr_anx_mean)
+
+# Build participant-level PS dataset
+ps_df <- traj_df %>%
+  distinct(participant_id, ssri_after,
+           mh_p_famhx__dep__moth_001, mom_age_preg,
+           mat_race, ab_g_dyn__cohort_income__hhold__6lvl,
+           ab_g_dyn__cohort_edu__cgs,
+           nonssriad_before, anticonvulsant_before, stimulant_before,
+           sleepaid_before, anxiolytic_before, antipsychotic_before,
+           opioid_before, alc_before, mj_before, nic_before, coc_before) %>%
+  left_join(asr_means_ps, by = "participant_id") %>%
+  mutate(
+    mom_age_preg_c = as.numeric(scale(mom_age_preg, scale = FALSE)),
+    asr_dep_mean_c = as.numeric(scale(asr_dep_mean, scale = FALSE)),
+    asr_anx_mean_c = as.numeric(scale(asr_anx_mean, scale = FALSE))
+  ) %>%
+  filter(if_all(all_of(ps_covars), ~ !is.na(.x)),
+         !is.na(ssri_after))
+
+cat("\nPS complete-case N (trajectory):", nrow(ps_df), "\n")
+
+w_out_traj <- weightit(
+  formula  = reformulate(ps_covars, response = "ssri_after"),
+  data     = ps_df,
+  method   = "ps",
+  estimand = "ATT"
+)
+w_out_traj <- trim(w_out_traj, at = 0.99)
+ps_df$w_att <- w_out_traj$weights
+
+# Merge weights back to long-format data
+traj_df <- traj_df %>%
+  left_join(ps_df %>% select(participant_id, w_att), by = "participant_id")
+
+# Center age
+age_center <- mean(traj_df$ab_g_dyn__visit_age, na.rm = TRUE)
+traj_df <- traj_df %>%
+  mutate(
+    age_c  = ab_g_dyn__visit_age - age_center,
+    age_c2 = age_c^2,
+    asr_dep_long_c = as.numeric(scale(asr_dep_long, scale = FALSE)),
+    asr_anx_long_c = as.numeric(scale(asr_anx_long, scale = FALSE))
+  )
+
+cat("Age center (grand mean):", round(age_center, 2), "years\n")
+
+# -----------------------------
+# 4) Helper: reference values for prediction grid
+#    (mirrors Milenna's get_ref function)
+# -----------------------------
+get_ref <- function(x) {
+  if (is.numeric(x)) median(x, na.rm = TRUE)
+  else levels(x)[which.max(table(x))]
+}
+
+# -----------------------------
+# 5) Helper: build prediction grid
+# -----------------------------
+make_pred_grid <- function(model, data, exposure_var, age_center) {
+  age_seq <- seq(
+    from = min(data$ab_g_dyn__visit_age, na.rm = TRUE),
+    to   = max(data$ab_g_dyn__visit_age, na.rm = TRUE),
+    length.out = 100
+  )
+
+  grid <- expand.grid(
+    age                = age_seq,
+    ssri_after         = c(0, 1)
+  ) %>%
+    mutate(
+      age_c  = age - age_center,
+      age_c2 = age_c^2
+    )
+
+  # Fill all other model terms at reference values
+  covars_needed <- setdiff(
+    names(model.frame(model)),
+    c(names(grid), "(weights)")
+  )
+
+  for (v in covars_needed) {
+    grid[[v]] <- get_ref(data[[v]])
+  }
+
+  grid$pred <- predict(model, newdata = grid, re.form = NA)
+  grid
+}
+
+# -----------------------------
+# 6) Main loop: fit linear + quadratic models per outcome,
+#    compare via anova(), plot winning model trajectory
+# -----------------------------
+output_path <- "C:/Users/jowjo/OneDrive/Desktop/ALL NYSPI/Work for Milenna/04112026 ACE Run/Results"
+dir.create(output_path, recursive = TRUE, showWarnings = FALSE)
+
+trajectory_results <- list()
+all_fixed_effects  <- list()
+
+for (out in outcomes) {
+
+  y     <- out$var
+  label <- out$label
+  cat("\n\n============================================================\n")
+  cat("Outcome:", label, "\n")
+  cat("============================================================\n")
+
+  # Complete cases for this outcome
+  data_y <- traj_df %>%
+    filter(
+      !is.na(.data[[y]]),
+      !is.na(w_att),
+      !is.na(age_c),
+      !is.na(ssri_after),
+      !is.na(ssri_before),
+      !is.na(asr_dep_long_c),
+      !is.na(asr_anx_long_c),
+      !is.na(site),
+      !is.na(fam_id)
+    )
+
+  cat("N rows (complete cases):", nrow(data_y), "\n")
+  cat("N participants:         ", n_distinct(data_y$participant_id), "\n")
+  cat("N exposed participants: ",
+      n_distinct(data_y$participant_id[data_y$ssri_after == 1]), "\n")
+
+  # Fixed effects covariates (Model B specification)
+  fixed_covars <- c(
+    "ssri_before",
+    "asr_dep_long_c", "asr_anx_long_c",
+    "mh_p_famhx__dep__moth_001",
+    "mom_age_preg",
+    "mat_race",
+    "ab_g_dyn__cohort_income__hhold__6lvl",
+    "ab_g_dyn__cohort_edu__cgs",
+    "planned_preg",
+    "prenatal_vit",
+    "nonssriad_after", "otheratd_after",
+    "anticonvulsant_after", "stimulant_after",
+    "sleepaid_after", "anxiolytic_after",
+    "antipsychotic_after", "opioid_after",
+    "alc_after", "mj_after", "nic_after", "coc_after"
+  )
+
+  # Drop any fixed covariates that are all-NA in this subset
+  fixed_covars <- fixed_covars[sapply(fixed_covars, function(v) {
+    v %in% names(data_y) && sum(!is.na(data_y[[v]])) > 0
+  })]
+
+  fixed_rhs <- paste(fixed_covars, collapse = " + ")
+
+  # Linear model: age_c * ssri_after
+formula_linear <- as.formula(paste0(
+  y, " ~ age_c * ssri_after + ", fixed_rhs,
+  " + (1 | site/fam_id) + (1 | participant_id)"
+))
+
+  # Quadratic model: age_c * ssri_after + age_c2 * ssri_after
+formula_quad <- as.formula(paste0(
+  y, " ~ age_c * ssri_after + age_c2 * ssri_after + ", fixed_rhs,
+  " + (1 | site/fam_id) + (1 | participant_id)"
+))
+
+
+  model_linear <- tryCatch(
+    lmer(formula_linear, data = data_y, weights = w_att, REML = FALSE),
+    error = function(e) { cat("Linear model failed:", conditionMessage(e), "\n"); NULL }
+  )
+
+  model_quad <- tryCatch(
+    lmer(formula_quad, data = data_y, weights = w_att, REML = FALSE),
+    error = function(e) { cat("Quadratic model failed:", conditionMessage(e), "\n"); NULL }
+  )
+
+  if (is.null(model_linear) || is.null(model_quad)) next
+
+  # Compare linear vs quadratic
+  anova_result <- anova(model_linear, model_quad)
+  cat("\nLinear vs Quadratic anova:\n")
+  print(anova_result)
+
+  # Select winning model
+  quad_p <- anova_result[["Pr(>Chisq)"]][2]
+  if (!is.na(quad_p) && quad_p < .05) {
+    winning_model <- model_quad
+    winning_label <- "Quadratic"
+  } else {
+    winning_model <- model_linear
+    winning_label <- "Linear"
+  }
+  cat("Winning model:", winning_label, "\n")
+
+  # Fixed effects summary
+  cat("\nFixed effects (winning model):\n")
+  print(summary(winning_model)$coefficients)
+
+  # Store results
+  trajectory_results[[y]] <- list(
+    model_linear  = model_linear,
+    model_quad    = model_quad,
+    anova         = anova_result,
+    winning_model = winning_model,
+    winning_label = winning_label
+  )
+
+  # Fixed effects to data frame
+  fe <- as.data.frame(summary(winning_model)$coefficients)
+  fe$term    <- rownames(fe)
+  fe$outcome <- label
+  fe$model   <- winning_label
+  rownames(fe) <- NULL
+  all_fixed_effects[[y]] <- fe
+
+  # ---------------------------
+  # 7) Prediction grid + plot
+  # ---------------------------
+  pred_grid <- tryCatch(
+    make_pred_grid(winning_model, data_y, "ssri_after", age_center),
+    error = function(e) { cat("Prediction failed:", conditionMessage(e), "\n"); NULL }
+  )
+
+  if (is.null(pred_grid)) next
+
+  p <- ggplot(pred_grid,
+              aes(x = age, y = pred, color = factor(ssri_after))) +
+    geom_line(linewidth = 1.3) +
+    labs(
+      title  = paste0(label, " Trajectory by Prenatal SSRI Exposure"),
+      subtitle = paste0(winning_label, " age term | ATT-weighted | Model B covariates"),
+      x      = "Child Age (years)",
+      y      = paste0("Adjusted ", label),
+      color  = "Prenatal SSRI"
+    ) +
+    scale_color_manual(
+      values = out$color,
+      labels = c("0" = "Unexposed", "1" = "SSRI Exposed")
+    ) +
+    theme_classic(base_size = 14) +
+    theme(legend.position = "bottom")
+
+  print(p)
+
+  ggsave(
+    filename = file.path(output_path, paste0("WvD_Trajectory_", gsub(" ", "_", label), ".png")),
+    plot     = p,
+    width    = 7,
+    height   = 5,
+    dpi      = 300
+  )
+
+  cat("Plot saved for:", label, "\n")
+}
+
+# -----------------------------
+# 8) Save combined fixed effects
+# -----------------------------
+fixed_effects_all <- bind_rows(all_fixed_effects)
+names(fixed_effects_all)[1:4] <- c("estimate", "std_error", "df", "t_value")
+
+write.csv(
+  fixed_effects_all,
+  file      = file.path(output_path, "WvD_Trajectory_FixedEffects.csv"),
+  row.names = FALSE
+)
+
+cat("\n\nTrajectory analysis complete.\n")
+cat("Results saved to:", output_path, "\n")
+
+################################################################################
+# Output: trajectory_results (list), fixed_effects_all, four PNG plots
+################################################################################
